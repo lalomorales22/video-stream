@@ -1,4 +1,6 @@
 # video-stream
+<img width="821" height="577" alt="Screenshot 2026-07-18 at 8 03 51 PM" src="https://github.com/user-attachments/assets/c8f4b0c0-56cc-47ba-a983-b1bad9ec91d1" />
+
 
 Broadcast every local camera over Wi‑Fi. Each stream gets a shareable URL you can copy and paste into **OBS** on any machine on the same network.
 
