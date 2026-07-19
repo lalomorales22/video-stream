@@ -18,40 +18,80 @@ Broadcast every local camera over Wi‑Fi. Each stream gets a shareable URL you 
 - One-click **Copy** on every URL
 - Live mini previews in a sleek black UI
 - Start / stop per camera, rescan devices
+- One-command install + `video-stream` launcher that opens the app
 
-## Quick start
+## Install
 
 ```bash
-# clone
 git clone https://github.com/lalomorales22/video-stream.git
 cd video-stream
-
-# install
-python3 -m venv .venv
-source .venv/bin/activate   # Windows: .venv\Scripts\activate
-pip install -r requirements.txt
-
-# run
-python -m video_stream
+./install.sh
 ```
 
-Open the dashboard:
+That’s it. The installer will:
 
-- This machine: [http://127.0.0.1:8765](http://127.0.0.1:8765)
-- Other machines on your LAN: `http://<your-lan-ip>:8765`
+1. Create a project virtualenv (`.venv`)
+2. Install Python dependencies (editable install)
+3. Put a **`video-stream`** command on your PATH at `~/.local/bin/video-stream`
+4. Add `~/.local/bin` to your PATH in `~/.zshrc` / `~/.bashrc` if it isn’t already there
 
-macOS may prompt for **Camera** permission the first time — allow it, then hit **Rescan**.
+If it updated your shell config, open a **new terminal** (or run `source ~/.zshrc`).
 
-### Install as a command (optional)
+Re-run `./install.sh` anytime after pulling updates to refresh the install.
+
+### Requirements
+
+- **Python 3.10+** (`python3` on your PATH)
+- macOS / Linux (Windows: use the [manual install](#manual-install-optional) path)
+- Camera permission when the OS prompts you
+
+## Run
+
+From any terminal:
 
 ```bash
-pip install -e .
 video-stream
+```
+
+This will:
+
+1. Start the local Wi‑Fi broadcaster (default port **8765**)
+2. Open the dashboard in your browser at [http://127.0.0.1:8765](http://127.0.0.1:8765)
+
+Useful variants:
+
+```bash
+video-stream --help
+video-stream --port 9000
+video-stream --no-open          # start server only, don’t open browser
+video-stream --width 1920 --height 1080 --fps 30 --quality 85
+```
+
+### URLs after launch
+
+| Where | URL |
+|--------|-----|
+| This machine | [http://127.0.0.1:8765](http://127.0.0.1:8765) |
+| Other devices on your LAN | `http://<your-lan-ip>:8765` |
+
+macOS may prompt for **Camera** permission the first time — allow it, then hit **Rescan** in the dashboard.
+
+### Manual install (optional)
+
+If you prefer not to use `install.sh`:
+
+```bash
+git clone https://github.com/lalomorales22/video-stream.git
+cd video-stream
+python3 -m venv .venv
+source .venv/bin/activate   # Windows: .venv\Scripts\activate
+pip install -e .
+python -m video_stream
 ```
 
 ## Use with OBS
 
-1. Run **video-stream** on the machine that has the cameras.
+1. Run **`video-stream`** on the machine that has the cameras.
 2. In the dashboard, copy the **OBS · Browser Source** URL (use a **LAN** IP, not `127.0.0.1`, on the remote PC).
 3. On the OBS machine (same Wi‑Fi / network):
    - **Sources → + → Browser**
@@ -74,9 +114,9 @@ Camera ids are integers starting at `0`.
 ## CLI options
 
 ```bash
-python -m video_stream --help
-
-python -m video_stream --port 8765 --width 1280 --height 720 --fps 30 --quality 80
+video-stream --help
+video-stream --port 8765 --width 1280 --height 720 --fps 30 --quality 80
+video-stream --no-open
 ```
 
 | Flag | Default | Description |
@@ -87,6 +127,7 @@ python -m video_stream --port 8765 --width 1280 --height 720 --fps 30 --quality 
 | `--height` | `720` | Capture height |
 | `--fps` | `30` | Target FPS |
 | `--quality` | `80` | JPEG quality (40–95) |
+| `--open` / `--no-open` | open | Open the dashboard in your browser |
 
 Environment variables: `VIDEO_STREAM_HOST`, `VIDEO_STREAM_PORT`.
 
@@ -111,6 +152,7 @@ Both machines must be on the **same LAN / Wi‑Fi** (or routed private network).
 
 ```
 video-stream/
+├── install.sh          # one-shot setup + PATH launcher
 ├── video_stream/
 │   ├── app.py          # FastAPI routes + CLI
 │   ├── camera.py       # discovery & MJPEG capture

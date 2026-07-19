@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import argparse
 import os
+import threading
+import time
+import webbrowser
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
@@ -258,7 +261,33 @@ def build_parser() -> argparse.ArgumentParser:
         help="JPEG quality 40–95 (default 80)",
     )
     p.add_argument("--reload", action="store_true", help="Dev auto-reload")
+    p.add_argument(
+        "--open",
+        dest="open_browser",
+        action="store_true",
+        default=True,
+        help="Open the dashboard in your browser (default)",
+    )
+    p.add_argument(
+        "--no-open",
+        dest="open_browser",
+        action="store_false",
+        help="Do not open a browser window",
+    )
     return p
+
+
+def _open_dashboard(port: int, delay: float = 1.0) -> None:
+    url = f"http://127.0.0.1:{port}"
+
+    def _run() -> None:
+        time.sleep(delay)
+        try:
+            webbrowser.open(url)
+        except Exception:
+            pass
+
+    threading.Thread(target=_run, name="open-browser", daemon=True).start()
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -283,7 +312,12 @@ def main(argv: list[str] | None = None) -> None:
     print(f"  Network    http://{lan}:{args.port}")
     print(f"  Streams    http://{lan}:{args.port}/stream/{{id}}")
     print(f"  OBS view   http://{lan}:{args.port}/view/{{id}}")
+    if args.open_browser:
+        print("  Opening dashboard in your browser…")
     print()
+
+    if args.open_browser:
+        _open_dashboard(args.port)
 
     uvicorn.run(
         "video_stream.app:app",
