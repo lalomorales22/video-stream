@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>video-stream</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Syne:wght@500;600;700;800&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/static/css/style.css" />
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='14' fill='%230c0c0e' stroke='%23ff3d6e' stroke-width='2'/%3E%3Ccircle cx='16' cy='16' r='5' fill='%23ff3d6e'/%3E%3C/svg%3E" />
+</head>
+<body>
+  <div class="grain" aria-hidden="true"></div>
+  <div class="glow glow-a" aria-hidden="true"></div>
+  <div class="glow glow-b" aria-hidden="true"></div>
+
+  <div class="app">
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true">
+          <span class="brand-core"></span>
+        </span>
+        <div class="brand-text">
+          <h1>video-stream</h1>
+          <p class="tagline">local cameras · wifi broadcast · obs ready</p>
+        </div>
+      </div>
+
+      <div class="topbar-meta">
+        <div class="pill" id="live-pill" title="Active streams">
+          <span class="pulse"></span>
+          <span id="live-count">—</span>
+        </div>
+        <div class="pill mono" id="host-pill" title="Primary LAN address">
+          {{ primary_ip }}:{{ port }}
+        </div>
+        <button type="button" class="btn btn-ghost" id="btn-refresh" title="Re-scan cameras">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M21 12a9 9 0 1 1-2.64-6.36"/>
+            <polyline points="21 3 21 9 15 9"/>
+          </svg>
+          Rescan
+        </button>
+      </div>
+    </header>
+
+    <section class="howto panel">
+      <div class="howto-grid">
+        <div>
+          <span class="eyebrow">OBS · Browser Source</span>
+          <h2>Paste a view URL on any machine on this network</h2>
+          <p>
+            Add a <strong>Browser Source</strong> in OBS and use the
+            <span class="chip">view</span> link for a full-bleed feed, or the
+            <span class="chip">stream</span> MJPEG URL with a Media / VLC source.
+          </p>
+        </div>
+        <ol class="steps">
+          <li>Keep this app running on the camera machine</li>
+          <li>Copy a LAN URL below (not localhost on the remote PC)</li>
+          <li>In OBS: Sources → Browser → paste URL → set width/height</li>
+        </ol>
+      </div>
+    </section>
+
+    <section class="toolbar">
+      <div class="toolbar-left">
+        <h2 class="section-title">Streams</h2>
+        <span class="muted mono" id="camera-count">scanning…</span>
+      </div>
+      <div class="toolbar-right">
+        <label class="toggle">
+          <input type="checkbox" id="prefer-lan" checked />
+          <span>Prefer LAN URLs</span>
+        </label>
+      </div>
+    </section>
+
+    <main id="camera-grid" class="camera-grid" aria-live="polite">
+      <div class="empty-state" id="empty-state">
+        <div class="empty-icon" aria-hidden="true">◎</div>
+        <h3>Looking for cameras…</h3>
+        <p>Grant camera access if prompted. Plug in a USB cam and hit Rescan.</p>
+      </div>
+    </main>
+
+    <footer class="footer">
+      <span class="mono">v{{ version }}</span>
+      <span class="dot" aria-hidden="true"></span>
+      <span>binds 0.0.0.0 · same Wi‑Fi / LAN required for remote OBS</span>
+    </footer>
+  </div>
+
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+  <script src="/static/js/app.js"></script>
+</body>
+</html>
