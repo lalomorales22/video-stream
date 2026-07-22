@@ -143,6 +143,60 @@ Allow inbound TCP on the chosen port (default **8765**) so other devices can rea
 
 Both machines must be on the **same LAN / Wi‑Fi** (or routed private network). Guest Wi‑Fi isolation will block this.
 
+## Troubleshooting
+
+### `video-stream is not installed correctly.`
+
+The `video-stream` command is **not a shell alias** — it's a small launcher script generated at
+`~/.local/bin/video-stream` with the project path baked into it. If you **move or rename the project
+folder**, that hardcoded path goes stale and the launcher exits with:
+
+```
+video-stream is not installed correctly.
+Run:  cd /old/path/to/project && ./install.sh
+```
+
+Fix it by re-running the installer from the folder's **current** location:
+
+```bash
+cd /path/to/video-stream
+./install.sh
+```
+
+If it still fails, the `.venv` also has the old path baked into its scripts — rebuild it from scratch:
+
+```bash
+cd /path/to/video-stream
+rm -rf .venv
+./install.sh
+```
+
+### `command not found: video-stream`
+
+`~/.local/bin` isn't on your PATH. Open a new terminal (the installer adds it to your shell config),
+or run `source ~/.zshrc`. To check:
+
+```bash
+echo $PATH | tr ':' '\n' | grep '.local/bin'
+```
+
+### Port already in use
+
+Another copy is still running, or something else holds the port. Find and stop it:
+
+```bash
+lsof -i :8765          # see what's on the port
+pkill -f video_stream  # stop a stray instance
+```
+
+Or just pick a different port: `video-stream --port 9000`.
+
+### No cameras listed
+
+Grant the OS camera permission when prompted (macOS: System Settings → Privacy & Security → Camera),
+then click **Rescan** in the dashboard. Cameras held exclusively by another app (Zoom, Photo Booth,
+OBS' own capture) may not appear until that app releases them.
+
 ## Stack
 
 - **Python 3.10+**
