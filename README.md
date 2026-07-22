@@ -68,6 +68,17 @@ runtime (the dashboard just shows no cameras, with no error explaining why):
 
 2. **At least one `/dev/video*` node exists** — i.e. a camera is actually attached.
 
+**Open the port in your firewall.** Most desktop Linux distros — **Omarchy included** —
+ship with `ufw` enabled, which blocks the stream from every other machine while it keeps
+working perfectly in a browser on the Linux box itself:
+
+```bash
+sudo ufw allow 8765/tcp
+```
+
+The installer deliberately does not do this for you; changing firewall rules is your call,
+not an installer's.
+
 No system OpenCV packages are needed. The project uses `opencv-python-headless`, which
 ships its own libraries and avoids the `libGL.so.1` error the regular `opencv-python`
 wheel throws on minimal/headless installs.
@@ -218,6 +229,37 @@ pkill -f video_stream  # stop a stray instance
 ```
 
 Or just pick a different port: `video-stream --port 9000`.
+
+### Works on the host, but other machines see nothing
+
+The dashboard and streams load fine on the machine running `video-stream`, yet a browser or
+OBS on another computer gets a blank page or a connection error. The stream itself is
+healthy — something is blocking the port between the two machines.
+
+Check in this order:
+
+1. **Are you using the LAN URL?** `127.0.0.1` always means *the machine you typed it on*.
+   From another computer you must use the `192.168.x.x` address shown in the dashboard.
+2. **Firewall on the host.** The most common cause on Linux, where `ufw` is on by default
+   (see [Linux notes](#linux-notes)):
+
+   ```bash
+   sudo ufw allow 8765/tcp                  # Linux
+   ```
+
+   On macOS: System Settings → Network → Firewall.
+3. **Same network?** Both machines must be on the same LAN. Guest Wi‑Fi and "client
+   isolation" / AP isolation modes block device-to-device traffic by design, even when
+   both devices have working internet.
+
+To confirm reachability from the other machine:
+
+```bash
+curl -I http://<host-lan-ip>:8765/
+```
+
+A `200` means the network path is fine and the problem is in OBS. A hang or "connection
+refused" means it's still firewall or network.
 
 ### No cameras listed
 
