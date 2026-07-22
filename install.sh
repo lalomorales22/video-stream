@@ -10,15 +10,46 @@ PYTHON_BIN="${VENV}/bin/python"
 
 bold() { printf '\033[1m%s\033[0m\n' "$*"; }
 ok()   { printf '  \033[32m✓\033[0m %s\n' "$*"; }
+warn() { printf '  \033[33m!\033[0m %s\n' "$*"; }
 info() { printf '  → %s\n' "$*"; }
 die()  { printf '\033[31merror:\033[0m %s\n' "$*" >&2; exit 1; }
 
 bold "video-stream · install"
 echo
 
+OS="$(uname -s)"
+
 # ── Python ─────────────────────────────────────────────
 if ! command -v python3 >/dev/null 2>&1; then
   die "python3 not found. Install Python 3.10+ and re-run."
+fi
+
+# ── Linux camera preflight ─────────────────────────────
+# Both of these fail *silently* at runtime: the dashboard simply lists no
+# cameras, with nothing to indicate why. Warn here instead.
+if [[ "${OS}" == "Linux" ]]; then
+  if ! python3 -c 'import venv' 2>/dev/null; then
+    die "Python venv module missing. Install it (Debian/Ubuntu: apt install python3-venv) and re-run."
+  fi
+
+  shopt -s nullglob
+  VIDEO_NODES=(/dev/video*)
+  shopt -u nullglob
+
+  if (( ${#VIDEO_NODES[@]} == 0 )); then
+    warn "No /dev/video* devices found — no cameras are currently attached."
+    info "Plug a camera in and re-run, or continue and use Rescan in the dashboard later."
+  else
+    ok "found ${#VIDEO_NODES[@]} /dev/video* node(s)"
+  fi
+
+  if ! id -nG "$(id -un)" 2>/dev/null | tr ' ' '\n' | grep -qx video; then
+    warn "$(id -un) is not in the 'video' group — cameras will not open."
+    info "Fix with:  sudo usermod -aG video $(id -un)"
+    info "Then log out and back in (group changes need a fresh session)."
+  else
+    ok "user is in the 'video' group"
+  fi
 fi
 
 PY_VER="$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"

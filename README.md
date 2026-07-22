@@ -47,6 +47,34 @@ Re-run `./install.sh` anytime after pulling updates to refresh the install.
 - macOS / Linux (Windows: use the [manual install](#manual-install-optional) path)
 - Camera permission when the OS prompts you
 
+### Linux notes
+
+Works on Linux (tested against Arch-based setups such as **Omarchy**). Cameras are
+discovered through **V4L2** by enumerating the real `/dev/video*` nodes, so sparse and
+non-contiguous device numbering is handled correctly. Where the kernel exposes a device
+name, it's used instead of a generic label — you'll see `Logitech BRIO` rather than
+`Camera 2`, which matters once several cameras are connected.
+
+Two Linux-specific things the installer checks for you, because both fail *silently* at
+runtime (the dashboard just shows no cameras, with no error explaining why):
+
+1. **`video` group membership** — required to open `/dev/video*`:
+
+   ```bash
+   sudo usermod -aG video "$USER"
+   ```
+
+   Log out and back in afterward; group changes only apply to a new session.
+
+2. **At least one `/dev/video*` node exists** — i.e. a camera is actually attached.
+
+No system OpenCV packages are needed. The project uses `opencv-python-headless`, which
+ships its own libraries and avoids the `libGL.so.1` error the regular `opencv-python`
+wheel throws on minimal/headless installs.
+
+If your distro doesn't bundle the venv module, install it first
+(Debian/Ubuntu: `apt install python3-venv`; Arch/Omarchy already includes it).
+
 ## Run
 
 From any terminal:
@@ -196,6 +224,17 @@ Or just pick a different port: `video-stream --port 9000`.
 Grant the OS camera permission when prompted (macOS: System Settings → Privacy & Security → Camera),
 then click **Rescan** in the dashboard. Cameras held exclusively by another app (Zoom, Photo Booth,
 OBS' own capture) may not appear until that app releases them.
+
+**On Linux**, the usual cause is group permissions rather than the camera itself. Check that the
+devices exist and that you can read them:
+
+```bash
+ls -l /dev/video*      # nodes present?
+id -nG | grep video    # are you in the 'video' group?
+```
+
+If `video` is missing, run `sudo usermod -aG video "$USER"` and start a new login session.
+See [Linux notes](#linux-notes) for the rest.
 
 ## Stack
 

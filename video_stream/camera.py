@@ -3,13 +3,52 @@
 from __future__ import annotations
 
 import platform
+import re
 import threading
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Generator
 
 import cv2
 import numpy as np
+
+_V4L_SYS = Path("/sys/class/video4linux")
+_DEV_NODE_RE = re.compile(r"^video(\d+)$")
+
+
+def _candidate_indices(max_probe: int) -> tuple[list[int], bool]:
+    """Indices worth probing, plus whether the list is authoritative.
+
+    On Linux the kernel tells us exactly which capture nodes exist, so we return the
+    real (often sparse) device numbers and mark them exhaustive. Elsewhere we fall back
+    to a blind 0..max_probe scan, where a run of misses means the end of the list.
+    """
+    if platform.system() == "Linux" and _V4L_SYS.is_dir():
+        indices = sorted(
+            int(m.group(1))
+            for entry in _V4L_SYS.iterdir()
+            if (m := _DEV_NODE_RE.match(entry.name))
+        )
+        if indices:
+            return indices, True
+
+    return list(range(max_probe)), False
+
+
+def _device_label(index: int) -> str | None:
+    """Human-readable name for a Linux V4L2 device, e.g. 'Logitech BRIO'."""
+    try:
+        raw = (_V4L_SYS / f"video{index}" / "name").read_text().strip()
+    except OSError:
+        return None
+    if not raw:
+        return None
+    # Vendors commonly repeat the model ("Logitech BRIO: Logitech BRIO").
+    head, sep, tail = raw.partition(":")
+    if sep and tail.strip().startswith(head.strip()):
+        raw = tail.strip()
+    return raw
 
 
 @dataclass
@@ -219,6 +258,13 @@ class CameraStream:
             if cap.isOpened():
                 return cap
             cap.release()
+        elif system == "Linux":
+            # V4L2 explicitly: the default backend can pick GStreamer, which is far
+            # pickier about pixel formats on plain UVC webcams.
+            cap = cv2.VideoCapture(index, cv2.CAP_V4L2)
+            if cap.isOpened():
+                return cap
+            cap.release()
 
         cap = cv2.VideoCapture(index)
         return cap if cap.isOpened() else None
@@ -244,9 +290,10 @@ class CameraManager:
         self._lock = threading.Lock()
 
     def discover(self, auto_start: bool = True) -> list[CameraInfo]:
+        candidates, exhaustive = _candidate_indices(self.max_probe)
         found: list[CameraInfo] = []
         misses = 0
-        for index in range(self.max_probe):
+        for index in candidates:
             # Skip re-probe of already-known streams
             with self._lock:
                 existing = self._streams.get(index)
@@ -260,11 +307,17 @@ class CameraManager:
             name = self._probe_name(index)
             if name is None:
                 misses += 1
-                # Indices are usually dense; stop probing once the run of misses grows.
-                if found and misses >= 1:
-                    break
-                if not found and misses >= 3:
-                    break
+                # When the candidate list came from real device nodes it is short and
+                # authoritative, so probe all of it. Gaps are normal there: on Linux each
+                # UVC camera also registers a metadata node that opens but yields no
+                # frames, which would otherwise cut the scan short and hide later cameras.
+                if not exhaustive:
+                    # Blind probe of a fixed range; indices are dense, so a run of
+                    # misses means we are past the end.
+                    if found and misses >= 2:
+                        break
+                    if not found and misses >= 3:
+                        break
                 continue
 
             misses = 0
@@ -328,10 +381,12 @@ class CameraManager:
                 cap.release()
             return None
 
-        # Confirm a frame can be read (some indices open but are dead)
+        # Confirm a frame can be read. Some nodes open but never yield frames —
+        # notably the metadata node every Linux UVC camera registers alongside
+        # its capture node.
         ok, frame = cap.read()
         cap.release()
         if not ok or frame is None:
             return None
 
-        return f"Camera {index}"
+        return _device_label(index) or f"Camera {index}"
