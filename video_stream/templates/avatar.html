@@ -57,6 +57,34 @@
       position: fixed; z-index: 6; top: 14px; right: 14px;
       font: 500 11px/1 "IBM Plex Mono", monospace; color: rgba(255,255,255,.35);
     }
+
+    /* Gallery panel */
+    .gallery {
+      position: fixed; z-index: 7; top: 0; right: 0; height: 100%; width: 320px; max-width: 86vw;
+      background: rgba(12,12,14,0.92); border-left: 1px solid rgba(255,255,255,0.1);
+      backdrop-filter: blur(12px); display: flex; flex-direction: column;
+      transform: translateX(0); transition: transform .25s ease;
+      font: 400 13px/1.4 "IBM Plex Mono", ui-monospace, monospace; color: #ececf1;
+    }
+    .gallery.hidden { transform: translateX(100%); }
+    .gallery-head { display: flex; justify-content: space-between; align-items: center;
+      padding: 14px 16px; border-bottom: 1px solid rgba(255,255,255,0.08); }
+    .gallery-head strong { font: 700 14px "Syne", sans-serif; letter-spacing: .02em; }
+    .gallery-head button { background: none; border: none; color: #8b8b98; font-size: 16px; cursor: pointer; }
+    .gallery-head button:hover { color: #ececf1; }
+    .gallery-list { flex: 1; overflow-y: auto; padding: 10px; display: flex; flex-direction: column; gap: 8px; }
+    .g-item { border: 1px solid rgba(255,255,255,0.1); border-radius: 10px; padding: 10px 12px; background: #18181d; }
+    .g-item .g-name { font-weight: 600; margin-bottom: 6px; word-break: break-word; }
+    .g-item .g-tags { color: #8b8b98; font-size: 11px; margin-bottom: 8px; }
+    .g-item .g-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+    .g-item .g-actions button { font: 500 11px "IBM Plex Mono", monospace; color: #ececf1;
+      background: #23232a; border: 1px solid rgba(255,255,255,0.12); border-radius: 999px;
+      padding: 5px 10px; cursor: pointer; }
+    .g-item .g-actions button:hover { background: #2c2c34; }
+    .g-item .g-actions .g-del { color: #ff8fa8; }
+    .gallery-empty { color: #5c5c6a; text-align: center; padding: 24px 12px; }
+    .gallery-foot { padding: 10px 16px; border-top: 1px solid rgba(255,255,255,0.08);
+      color: #5c5c6a; font-size: 11px; }
   </style>
 </head>
 <body>
@@ -68,6 +96,16 @@
   <div id="status">loading…</div>
   <div id="fps"></div>
 
+  <!-- Gallery panel (slides in) -->
+  <div id="gallery" class="gallery hidden">
+    <div class="gallery-head">
+      <strong>Gallery</strong>
+      <button id="gallery-close" type="button" title="Close">✕</button>
+    </div>
+    <div id="gallery-list" class="gallery-list"></div>
+    <div class="gallery-foot">Saved avatars live here — Load one, or copy its OBS URL.</div>
+  </div>
+
   <div class="bar" id="bar">
     <button id="btn-track" type="button">Start tracking</button>
     <select id="src-select" title="Tracking source (local webcam or a camera stream)"></select>
@@ -75,6 +113,8 @@
     <button id="btn-body" type="button" title="Track arms, legs & torso (needs your body in frame)">Full&nbsp;body</button>
     <button id="btn-mirror" class="on" type="button" title="Mirror like a selfie">Mirror</button>
     <button id="btn-bg" type="button" title="Preview backdrop (not shown in OBS)">Preview&nbsp;bg</button>
+    <button id="btn-save" type="button" title="Save this avatar + setup to your gallery">Save</button>
+    <button id="btn-gallery" type="button" title="Open your saved avatars">Gallery</button>
     <button id="btn-copy" type="button" title="Copy a ready-to-paste OBS Browser Source URL with the current setup">Copy&nbsp;OBS&nbsp;URL</button>
   </div>
 

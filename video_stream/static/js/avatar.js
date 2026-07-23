@@ -37,7 +37,12 @@ const els = {
   btnBody: document.getElementById("btn-body"),
   btnMirror: document.getElementById("btn-mirror"),
   btnBg: document.getElementById("btn-bg"),
+  btnSave: document.getElementById("btn-save"),
+  btnGallery: document.getElementById("btn-gallery"),
   btnCopy: document.getElementById("btn-copy"),
+  gallery: document.getElementById("gallery"),
+  galleryList: document.getElementById("gallery-list"),
+  galleryClose: document.getElementById("gallery-close"),
 };
 
 // ── URL config ────────────────────────────────────────────────────────
@@ -62,6 +67,7 @@ let source = initialSrc
 
 let currentVrm = null;
 let currentVrmUrl = initialVrm || DEFAULT_VRM;
+let uploadedFile = null; // the local .vrm File (if any), so Save can persist it
 let faceLandmarker = null;
 let poseLandmarker = null;
 let stream = null;
@@ -527,6 +533,7 @@ els.srcSelect.addEventListener("change", () => {
 els.vrmFile.addEventListener("change", (e) => {
   const file = e.target.files?.[0];
   if (file) {
+    uploadedFile = file; // kept so Save can upload it to the gallery
     currentVrmUrl = null; // a local blob can't be shared to another machine's OBS
     loadVRM(URL.createObjectURL(file));
   }
@@ -596,6 +603,144 @@ async function copyObsUrl() {
   }
 }
 els.btnCopy.addEventListener("click", copyObsUrl);
+
+// ── gallery / presets ─────────────────────────────────────────────────
+function currentSettings() {
+  return {
+    mirror: settings.mirror,
+    body: settings.body,
+    zoom: +view.distance.toFixed(2),
+    pan: +view.targetY.toFixed(3),
+    ox: +view.ox.toFixed(3),
+    oy: +view.oy.toFixed(3),
+    src: source.kind === "stream" ? source.url : null,
+  };
+}
+
+async function saveToGallery() {
+  const name = prompt("Name this avatar:", "My Avatar");
+  if (name === null) return;
+  els.btnSave.disabled = true;
+  try {
+    // If it's a locally-uploaded VRM, persist it server-side so it survives and
+    // can be loaded from OBS on any machine.
+    let vrmUrl = currentVrmUrl;
+    if (!vrmUrl && uploadedFile) {
+      setStatus("uploading avatar…");
+      const res = await fetch("/api/avatar/vrm", {
+        method: "POST",
+        headers: { "Content-Type": "application/octet-stream" },
+        body: uploadedFile,
+      });
+      if (!res.ok) throw new Error("VRM upload failed");
+      vrmUrl = (await res.json()).url;
+      currentVrmUrl = vrmUrl; // now shareable
+    }
+    const res = await fetch("/api/avatar/presets", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name, vrm: vrmUrl, settings: currentSettings() }),
+    });
+    if (!res.ok) throw new Error("save failed");
+    setStatus("saved to gallery ✓", false, true);
+  } catch (err) {
+    setStatus("save failed: " + (err?.message || err), true);
+  } finally {
+    els.btnSave.disabled = false;
+  }
+}
+els.btnSave.addEventListener("click", saveToGallery);
+
+async function loadPreset(p) {
+  const s = p.settings || {};
+  settings.mirror = s.mirror !== false;
+  els.btnMirror.classList.toggle("on", settings.mirror);
+  if (s.src) source = { kind: "stream", url: s.src };
+  if (p.vrm) {
+    currentVrmUrl = p.vrm;
+    uploadedFile = null;
+    await loadVRM(p.vrm);
+  }
+  // Apply framing after the avatar loads (loadVRM reframes to defaults first).
+  if (typeof s.zoom === "number") view.distance = s.zoom;
+  if (typeof s.pan === "number") view.targetY = s.pan;
+  view.ox = typeof s.ox === "number" ? s.ox : 0;
+  view.oy = typeof s.oy === "number" ? s.oy : 0;
+  updateCamera();
+  await setBody(!!s.body);
+  els.gallery.classList.add("hidden");
+  setStatus("loaded " + (p.name || "preset"), false, true);
+}
+
+function presetObsUrl(p) {
+  const s = p.settings || {};
+  const q = new URLSearchParams({ obs: "1" });
+  if (p.vrm && p.vrm !== DEFAULT_VRM) q.set("vrm", p.vrm);
+  if (s.src) q.set("src", s.src);
+  if (s.body) q.set("body", "1");
+  q.set("mirror", s.mirror === false ? "0" : "1");
+  if (s.zoom != null) q.set("zoom", s.zoom);
+  if (s.pan != null) q.set("pan", s.pan);
+  if (s.ox) q.set("ox", s.ox);
+  if (s.oy) q.set("oy", s.oy);
+  return q;
+}
+
+async function renderGallery() {
+  els.galleryList.innerHTML = "<div class='gallery-empty'>loading…</div>";
+  let presets = [];
+  try {
+    presets = (await (await fetch("/api/avatar/presets")).json()).presets || [];
+  } catch {
+    els.galleryList.innerHTML = "<div class='gallery-empty'>couldn't load gallery</div>";
+    return;
+  }
+  if (!presets.length) {
+    els.galleryList.innerHTML =
+      "<div class='gallery-empty'>No saved avatars yet.<br>Set one up and press <b>Save</b>.</div>";
+    return;
+  }
+  let host = location.host;
+  try {
+    const d = await (await fetch("/api/status")).json();
+    if (d.primary_ip) host = d.primary_ip + ":" + (d.port || location.port || 8765);
+  } catch {}
+  els.galleryList.innerHTML = "";
+  presets.forEach((p) => {
+    const s = p.settings || {};
+    const tags = [s.body ? "full-body" : "face", s.src ? "stream" : "webcam"].join(" · ");
+    const item = document.createElement("div");
+    item.className = "g-item";
+    item.innerHTML =
+      `<div class="g-name"></div><div class="g-tags">${tags}</div>` +
+      `<div class="g-actions"><button class="g-load">Load</button>` +
+      `<button class="g-obs">Copy OBS URL</button>` +
+      `<button class="g-del">Delete</button></div>`;
+    item.querySelector(".g-name").textContent = p.name || "Avatar";
+    item.querySelector(".g-load").addEventListener("click", () => loadPreset(p));
+    item.querySelector(".g-obs").addEventListener("click", async () => {
+      const url = `${location.protocol}//${host}/avatar?${presetObsUrl(p).toString()}`;
+      try {
+        await navigator.clipboard.writeText(url);
+        setStatus("OBS URL copied ✓", false, true);
+      } catch {
+        setStatus(url, false);
+      }
+    });
+    item.querySelector(".g-del").addEventListener("click", async () => {
+      if (!confirm(`Delete "${p.name}"?`)) return;
+      await fetch("/api/avatar/presets/" + p.id, { method: "DELETE" });
+      renderGallery();
+    });
+    els.galleryList.appendChild(item);
+  });
+}
+
+els.btnGallery.addEventListener("click", () => {
+  els.gallery.classList.toggle("hidden");
+  if (!els.gallery.classList.contains("hidden")) renderGallery();
+});
+els.galleryClose.addEventListener("click", () => els.gallery.classList.add("hidden"));
 
 // Scroll to zoom; drag to move the avatar around the screen; double-click to recenter.
 els.canvas.addEventListener(

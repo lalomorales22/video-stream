@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import mimetypes
 import os
 import threading
 import time
+import uuid
 import webbrowser
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -34,8 +36,33 @@ ROOT = Path(__file__).resolve().parent
 STATIC_DIR = ROOT / "static"
 TEMPLATES_DIR = ROOT / "templates"
 
+# Avatar Studio gallery: saved avatar presets + their uploaded VRMs. Under static/
+# so the browser and OBS can load the VRMs directly; gitignored.
+GALLERY_DIR = STATIC_DIR / "gallery"
+GALLERY_VRM = GALLERY_DIR / "vrm"
+PRESETS_FILE = GALLERY_DIR / "presets.json"
+
+
 class Toggle(BaseModel):
     enabled: bool
+
+
+class Preset(BaseModel):
+    name: str
+    vrm: str | None = None
+    settings: dict[str, Any] = {}
+
+
+def _load_presets() -> list[dict[str, Any]]:
+    try:
+        return json.loads(PRESETS_FILE.read_text())
+    except Exception:
+        return []
+
+
+def _save_presets(items: list[dict[str, Any]]) -> None:
+    GALLERY_DIR.mkdir(parents=True, exist_ok=True)
+    PRESETS_FILE.write_text(json.dumps(items, indent=2))
 
 
 manager = CameraManager()
@@ -297,6 +324,53 @@ async def api_director():
     if director is None:
         return {"enabled": False}
     return {"enabled": True, **director.status()}
+
+
+# ── Avatar Studio: gallery of saved presets ───────────────────────────
+@app.get("/api/avatar/presets")
+async def list_presets():
+    return {"presets": _load_presets()}
+
+
+@app.post("/api/avatar/presets")
+async def add_preset(preset: Preset):
+    items = _load_presets()
+    entry = {
+        "id": uuid.uuid4().hex[:8],
+        "name": (preset.name or "Avatar")[:60],
+        "vrm": preset.vrm,
+        "settings": preset.settings,
+    }
+    items.append(entry)
+    _save_presets(items)
+    return {"preset": entry}
+
+
+@app.delete("/api/avatar/presets/{pid}")
+async def delete_preset(pid: str):
+    items = _load_presets()
+    kept = [p for p in items if p.get("id") != pid]
+    removed = [p for p in items if p.get("id") == pid]
+    _save_presets(kept)
+    # Remove an uploaded VRM that's no longer referenced by any preset.
+    for r in removed:
+        vrm = r.get("vrm") or ""
+        if "/static/gallery/vrm/" in vrm and not any(k.get("vrm") == vrm for k in kept):
+            (GALLERY_VRM / vrm.split("/")[-1]).unlink(missing_ok=True)
+    return {"ok": True}
+
+
+@app.post("/api/avatar/vrm")
+async def upload_vrm(request: Request):
+    data = await request.body()
+    if not data:
+        raise HTTPException(status_code=400, detail="empty upload")
+    if len(data) > 60_000_000:
+        raise HTTPException(status_code=400, detail="VRM too large (max 60 MB)")
+    GALLERY_VRM.mkdir(parents=True, exist_ok=True)
+    fid = uuid.uuid4().hex[:8]
+    (GALLERY_VRM / f"{fid}.vrm").write_bytes(data)
+    return {"url": f"/static/gallery/vrm/{fid}.vrm"}
 
 
 @app.post("/api/cameras/{index}/pose")
