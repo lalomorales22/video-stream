@@ -2,17 +2,19 @@
 <img width="821" height="577" alt="Screenshot 2026-07-18 at 8 03 51 PM" src="https://github.com/user-attachments/assets/c8f4b0c0-56cc-47ba-a983-b1bad9ec91d1" />
 
 
-Broadcast every local camera over Wi‑Fi. Each stream gets a shareable URL you can copy and paste into **OBS** on any machine on the same network.
+Broadcast every local camera over Wi‑Fi. Each stream gets a shareable URL you can copy and paste into **OBS** on any machine on the same network — and, optionally, run computer vision on the feeds: a live **pose skeleton** overlay and a hands-free **auto-director** that switches OBS to whichever camera is active.
 
 <div align="center">
 
-**Dark control dashboard · live mini previews · one-click copy URLs**
+**Dark control dashboard · live mini previews · one-click copy URLs · pose tracking · auto-switching**
 
 </div>
 
 ## Features
 
-- Discovers available cameras on launch
+**Streaming**
+
+- Discovers available cameras on launch (macOS · Linux · Windows)
 - Serves each camera as:
   - **Browser / OBS view** — full-bleed page for OBS *Browser Source*
   - **MJPEG stream** — raw multipart JPEG for Media / VLC sources
@@ -20,9 +22,14 @@ Broadcast every local camera over Wi‑Fi. Each stream gets a shareable URL you 
 - One-click **Copy** on every URL
 - Live mini previews in a sleek black UI
 - Start / stop per camera, rescan devices
-- Optional **live pose skeleton** overlay (motion tracking) that streams straight into OBS
-- Optional **auto-director** — switches OBS to the most active camera hands-free
 - One-command install + `video-stream` launcher that opens the app
+
+**Computer vision** (optional, toggle live from the dashboard)
+
+- [**Pose skeleton**](#pose-overlay-motion-tracking) — draws a live 33-point body skeleton on any
+  camera; the overlay streams straight into OBS with no OBS-side setup
+- [**Auto-director**](#auto-director-hands-free-camera-switching) — scores motion per camera and
+  auto-switches OBS to the active one over its WebSocket API, hands-free
 
 ## Install
 
