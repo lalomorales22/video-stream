@@ -450,6 +450,76 @@ input {
   white-space: nowrap;
 }
 
+/* Kill switch — the one red button that freezes every automation */
+.btn-kill {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  letter-spacing: 0.1em;
+  border-color: rgba(255, 61, 110, 0.35);
+  color: var(--signal);
+}
+.btn-kill .dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--signal);
+  transition: background 0.15s ease;
+}
+.btn-kill:hover {
+  background: var(--signal-dim);
+  border-color: var(--signal-glow);
+}
+.btn-kill.on {
+  color: #fff;
+  background: linear-gradient(180deg, #ff547f, var(--signal));
+  border-color: transparent;
+  box-shadow: 0 0 24px var(--signal-glow);
+}
+.btn-kill.on .dot {
+  background: #fff;
+  animation: core-pulse 0.9s ease-in-out infinite;
+}
+#safety-budget.warn {
+  color: var(--warn);
+  border-color: rgba(240, 180, 41, 0.35);
+}
+#safety-budget.killed {
+  color: var(--signal);
+  border-color: var(--signal-glow);
+}
+
+/* Replay highlight capture */
+.btn-highlight {
+  color: var(--cyan);
+  border-color: rgba(79, 209, 197, 0.35);
+}
+.btn-highlight:hover {
+  background: var(--cyan-dim);
+  border-color: rgba(79, 209, 197, 0.55);
+}
+
+/* Smart Zoom: previews are double-click punch-in targets */
+.preview-wrap img {
+  cursor: zoom-in;
+}
+.card.zoomed .preview-wrap img {
+  cursor: zoom-out;
+}
+.card.zoomed .preview-wrap::after {
+  content: "2×";
+  position: absolute;
+  bottom: 10px;
+  right: 10px;
+  z-index: 2;
+  padding: 3px 7px;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.55);
+  border: 1px solid rgba(79, 209, 197, 0.4);
+  color: var(--cyan);
+  font: 600 0.62rem/1 var(--font-mono);
+  letter-spacing: 0.08em;
+}
+
 /* "On air" card highlight when the director selects a camera */
 .card.on-air {
   outline: 2px solid var(--signal);

@@ -32,12 +32,19 @@ class DirectorConfig:
 
 
 class Director:
+    """House rule: every actuator that touches OBS on its own must ask
+    ``safety.guard_action("<subsystem>:<action>")`` first — the director does
+    here, and any future automation (chaos, broadcast, …) does the same the
+    day it's born, so the one kill switch really freezes everything."""
+
     def __init__(self, manager, obs_client=None, config: DirectorConfig | None = None,
-                 clock=time.monotonic) -> None:
+                 clock=time.monotonic, safety=None, on_switch=None) -> None:
         self.manager = manager
         self.obs = obs_client
         self.cfg = config or DirectorConfig()
         self._clock = clock
+        self.safety = safety
+        self.on_switch = on_switch  # callback(cam_index, scene, entry); any thread
 
         self.active: int | None = None
         self._candidate: int | None = None
@@ -98,6 +105,11 @@ class Director:
         return scores
 
     def _actuate(self, cam_index: int, scene: str) -> None:
+        if self.safety is not None:
+            ok, reason = self.safety.guard_action("director:switch")
+            if not ok:
+                print(f"[director] switch to camera {cam_index} skipped — {reason}")
+                return
         acted = False
         if self.obs is not None and not self.cfg.dry_run:
             if not self.obs.connected:
@@ -116,9 +128,21 @@ class Director:
         del self.log[:-20]  # keep last 20
         tag = "→ OBS" if acted else "(dry-run)" if self.cfg.dry_run else "(OBS not connected)"
         print(f"[director] switch to camera {cam_index} · scene '{scene}' {tag}")
+        if self.on_switch is not None:
+            try:
+                self.on_switch(cam_index, scene, entry)
+            except Exception:
+                pass  # a broken listener must never stop the show
 
     def _loop(self) -> None:
         while self._running:
+            # Probe (non-consuming) BEFORE the decision engine runs: while the
+            # kill switch or rate limiter would block a cut, the whole engine
+            # freezes instead of committing `active` for a cut that never
+            # happens — releasing the guard resumes from consistent state.
+            if self.safety is not None and not self.safety.check_action("director:switch")[0]:
+                time.sleep(self.cfg.interval)
+                continue
             switch = self.update(self._clock(), self._collect_scores())
             if switch is not None:
                 self._actuate(*switch)

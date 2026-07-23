@@ -168,6 +168,18 @@ class PoseOverlay:
                 continue
             cv2.circle(frame, (int(lm.x * w), int(lm.y * h)), 4, _POINT_COLOR, -1, cv2.LINE_AA)
 
+    def focus_point(self) -> tuple[float, float] | None:
+        """Normalized (x, y) where a punch-in should aim: the nose pulled toward
+        the shoulder midpoint, so the crop frames head + shoulders, not just
+        the face. None when no body is currently tracked."""
+        landmarks = self._last_landmarks
+        if not landmarks or len(landmarks) < 13:
+            return None
+        nose, l_shoulder, r_shoulder = landmarks[0], landmarks[11], landmarks[12]
+        x = (nose.x + (l_shoulder.x + r_shoulder.x) / 2) / 2
+        y = (nose.y + (l_shoulder.y + r_shoulder.y) / 2) / 2
+        return (min(1.0, max(0.0, x)), min(1.0, max(0.0, y)))
+
     def close(self) -> None:
         landmarker = getattr(self, "_landmarker", None)
         if landmarker is not None:

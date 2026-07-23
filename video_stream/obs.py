@@ -24,6 +24,22 @@ except Exception:  # pragma: no cover - websockets always present via uvicorn[st
     _ws_connect = None
 
 
+def _parse_replay_path(data: dict) -> str | None:
+    """Pull the saved replay's file path out of a GetLastReplayBufferReplay
+    response, probing every key obs-websocket has used across versions."""
+    for key in (
+        "savedReplayPath",
+        "lastReplayPath",
+        "lastReplayBufferReplayPath",
+        "outputPath",
+        "path",
+    ):
+        value = data.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
 def _auth_string(password: str, salt: str, challenge: str) -> str:
     secret = base64.b64encode(
         hashlib.sha256((password + salt).encode("utf-8")).digest()
@@ -67,7 +83,11 @@ class OBSClient:
                 url = f"ws://{self.host}:{self.port}"
                 ws = _ws_connect(url, open_timeout=self.timeout, close_timeout=self.timeout)
                 hello = json.loads(ws.recv(timeout=self.timeout))
-                identify = {"op": 1, "d": {"rpcVersion": 1}}
+                # eventSubscriptions=0: this client is request/response only.
+                # Without it OBS pushes every event (scene/media/input churn
+                # during a live show), which could starve the response scan
+                # in _request and poison later requests with stale replies.
+                identify = {"op": 1, "d": {"rpcVersion": 1, "eventSubscriptions": 0}}
                 auth = hello.get("d", {}).get("authentication")
                 if auth:
                     identify["d"]["authentication"] = _auth_string(
@@ -110,15 +130,88 @@ class OBSClient:
                 self._drop()
                 return None
 
+    @staticmethod
+    def _ok(resp: dict | None) -> bool:
+        return bool(resp and resp.get("requestStatus", {}).get("result"))
+
     def scene_list(self) -> list[str]:
         resp = self._request("GetSceneList")
-        if not resp or not resp.get("requestStatus", {}).get("result"):
+        if not self._ok(resp):
             return []
         return [s["sceneName"] for s in resp["responseData"].get("scenes", [])]
 
     def set_scene(self, scene_name: str) -> bool:
-        resp = self._request("SetCurrentProgramScene", {"sceneName": scene_name})
-        return bool(resp and resp.get("requestStatus", {}).get("result"))
+        return self._ok(
+            self._request("SetCurrentProgramScene", {"sceneName": scene_name})
+        )
+
+    # ── Replay buffer / sources (used by video_stream.replay) ─────────────
+
+    def replay_buffer_active(self) -> bool | None:
+        """True/False from OBS, or None when the request itself failed."""
+        resp = self._request("GetReplayBufferStatus")
+        if not self._ok(resp):
+            return None
+        return bool(resp["responseData"].get("outputActive"))
+
+    def start_replay_buffer(self) -> bool:
+        return self._ok(self._request("StartReplayBuffer"))
+
+    def save_replay_buffer(self) -> bool:
+        return self._ok(self._request("SaveReplayBuffer"))
+
+    def last_replay_path(self) -> str | None:
+        resp = self._request("GetLastReplayBufferReplay")
+        if not self._ok(resp):
+            return None
+        return _parse_replay_path(resp.get("responseData") or {})
+
+    def set_input_settings(self, name: str, settings: dict, overlay: bool = True) -> bool:
+        return self._ok(
+            self._request(
+                "SetInputSettings",
+                {"inputName": name, "inputSettings": settings, "overlay": overlay},
+            )
+        )
+
+    def trigger_media_restart(self, name: str) -> bool:
+        return self._ok(
+            self._request(
+                "TriggerMediaInputAction",
+                {
+                    "inputName": name,
+                    "mediaAction": "OBS_WEBSOCKET_MEDIA_INPUT_ACTION_RESTART",
+                },
+            )
+        )
+
+    def record_active(self) -> bool:
+        resp = self._request("GetRecordStatus")
+        return self._ok(resp) and bool(resp["responseData"].get("outputActive"))
+
+    def create_record_chapter(self, name: str) -> bool:
+        return self._ok(self._request("CreateRecordChapter", {"chapterName": name}))
+
+    def scene_item_id(self, scene: str, source: str) -> int | None:
+        resp = self._request(
+            "GetSceneItemId", {"sceneName": scene, "sourceName": source}
+        )
+        if not self._ok(resp):
+            return None
+        item_id = resp["responseData"].get("sceneItemId")
+        return int(item_id) if isinstance(item_id, (int, float)) else None
+
+    def set_scene_item_enabled(self, scene: str, item_id: int, enabled: bool) -> bool:
+        return self._ok(
+            self._request(
+                "SetSceneItemEnabled",
+                {
+                    "sceneName": scene,
+                    "sceneItemId": item_id,
+                    "sceneItemEnabled": enabled,
+                },
+            )
+        )
 
     def _drop(self) -> None:
         ws, self._ws = self._ws, None

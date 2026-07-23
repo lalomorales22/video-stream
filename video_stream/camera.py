@@ -62,6 +62,68 @@ class CameraInfo:
     active: bool = False
     error: str | None = None
     pose: bool = False
+    zoom: float = 1.0
+
+
+class ZoomState:
+    """Virtual-camera punch-in, ported from ChromaCanvas's Smart Zoom.
+
+    The capture thread calls ``apply()`` every frame: the view eases toward a
+    normalized target and the frame is cropped + rescaled, so the punch-in is
+    baked into the MJPEG and reaches every OBS with zero setup. Targets may be
+    set from any thread — plain float writes, read once per frame.
+    """
+
+    EASE = 0.14      # per-frame interpolation factor
+    MAX_ZOOM = 3.0   # webcams get mushy past ~3x (ChromaCanvas allowed 6x on screens)
+    _EPS = 0.005
+
+    def __init__(self) -> None:
+        self.cx, self.cy, self.zoom = 0.5, 0.5, 1.0    # eased view state
+        self.tx, self.ty, self.tzoom = 0.5, 0.5, 1.0   # target
+
+    def set_target(self, nx: float, ny: float, level: float) -> None:
+        self.tx = min(1.0, max(0.0, nx))
+        self.ty = min(1.0, max(0.0, ny))
+        self.tzoom = min(self.MAX_ZOOM, max(1.0, level))
+
+    def reset(self) -> None:
+        self.tx, self.ty, self.tzoom = 0.5, 0.5, 1.0
+
+    def to_frame_coords(self, nx: float, ny: float) -> tuple[float, float]:
+        """Map a normalized point in the *streamed* (possibly zoomed) view back
+        to raw-frame coordinates. Clicks and pose landmarks live in view space
+        — targets must be set in frame space, or re-aims while zoomed drift."""
+        if self.idle:
+            return nx, ny
+        sw = 1.0 / self.zoom
+        sh = 1.0 / self.zoom
+        sx = max(0.0, min(1.0 - sw, self.cx - sw / 2))
+        sy = max(0.0, min(1.0 - sh, self.cy - sh / 2))
+        return (sx + nx * sw, sy + ny * sh)
+
+    @property
+    def idle(self) -> bool:
+        return self.tzoom <= 1.0 and abs(self.zoom - 1.0) < self._EPS
+
+    def apply(self, frame: np.ndarray) -> np.ndarray:
+        if self.idle:
+            # Snap fully home so the next punch-in starts from a clean state.
+            self.cx, self.cy, self.zoom = 0.5, 0.5, 1.0
+            return frame
+        self.cx += (self.tx - self.cx) * self.EASE
+        self.cy += (self.ty - self.cy) * self.EASE
+        self.zoom += (self.tzoom - self.zoom) * self.EASE
+
+        h, w = frame.shape[:2]
+        sw = w / self.zoom
+        sh = h / self.zoom
+        sx = max(0.0, min(w - sw, self.cx * w - sw / 2))
+        sy = max(0.0, min(h - sh, self.cy * h - sh / 2))
+        crop = frame[int(sy) : int(sy + sh), int(sx) : int(sx + sw)]
+        if crop.size == 0:
+            return frame
+        return cv2.resize(crop, (w, h), interpolation=cv2.INTER_LINEAR)
 
 
 @dataclass
@@ -102,6 +164,8 @@ class CameraStream:
         self.motion_enabled = motion_enabled
         self.motion_score = 0.0
         self._motion = None  # MotionScorer, built on start()
+        self.zoom = ZoomState()
+        self._punch_timer: threading.Timer | None = None
         self.stats = StreamStats()
 
         self._cap: cv2.VideoCapture | None = None
@@ -135,6 +199,7 @@ class CameraStream:
             active=self.active,
             error=self._error,
             pose=self._pose is not None,
+            zoom=round(self.zoom.tzoom, 2),
         )
 
     def start(self) -> bool:
@@ -181,8 +246,53 @@ class CameraStream:
         self._thread.start()
         return True
 
+    def focus_point(self) -> tuple[float, float] | None:
+        """Normalized (x, y) anchor for auto punch-ins, from the pose overlay."""
+        pose = self._pose
+        if pose is None:
+            return None
+        try:
+            return pose.focus_point()
+        except Exception:
+            return None
+
+    def punch_in(self, level: float = 1.6, duration: float = 2.5) -> None:
+        """Director auto-punch: tighten on the subject, then ease back out.
+
+        Aims at the tracked face when the pose overlay is running, otherwise
+        center-frame. Pose landmarks are detected on the streamed (possibly
+        already-zoomed) frame, so the point is mapped back to frame space.
+        The ease-back timer keeps the shot wide again before the director's
+        cooldown allows the next cut.
+        """
+        point = self.focus_point()
+        point = self.zoom.to_frame_coords(*point) if point else (0.5, 0.5)
+        self.zoom.set_target(point[0], point[1], level)
+        self._cancel_punch_timer()
+        self._punch_timer = threading.Timer(duration, self.zoom.reset)
+        self._punch_timer.daemon = True
+        self._punch_timer.start()
+
+    def set_manual_zoom(self, nx: float, ny: float, level: float) -> None:
+        """Operator zoom from the dashboard. Cancels any pending auto-punch
+        ease-back so the director can't silently revert a manual shot, and
+        maps the clicked point (view space) into frame space."""
+        self._cancel_punch_timer()
+        if level <= 1.0:
+            self.zoom.reset()
+            return
+        fx, fy = self.zoom.to_frame_coords(nx, ny)
+        self.zoom.set_target(fx, fy, level)
+
+    def _cancel_punch_timer(self) -> None:
+        if self._punch_timer is not None:
+            self._punch_timer.cancel()
+            self._punch_timer = None
+
     def stop(self) -> None:
         self._running = False
+        self._cancel_punch_timer()
+        self.zoom.reset()
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=2.0)
         self._thread = None
@@ -269,10 +379,14 @@ class CameraStream:
                 time.sleep(0.02)
                 continue
 
-            # Score motion on the raw frame, before any overlay is drawn on it.
+            # Order matters here: motion is scored on the raw full frame (so the
+            # director and auto-replay judge the real room, not the crop), the
+            # punch-in zoom is applied next, and pose runs last so the skeleton
+            # is detected and drawn in the same zoomed space the viewer sees.
             if self._motion is not None:
                 self.motion_score = self._motion.update(frame)
 
+            frame = self.zoom.apply(frame)
             self._encode_frame(self._apply_pose(frame))
             self.stats.frames += 1
             now = time.time()

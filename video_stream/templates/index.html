@@ -35,6 +35,11 @@
         <div class="pill mono" id="host-pill" title="Primary LAN address">
           {{ primary_ip }}:{{ port }}
         </div>
+        <div class="pill mono" id="safety-budget" title="Automation budget · rolling 60s">—</div>
+        <button type="button" class="btn btn-ghost btn-kill" id="btn-kill" aria-pressed="false" title="Freeze every automation instantly (Ctrl+Shift+K)">
+          <span class="dot"></span>
+          <span id="kill-label">KILL</span>
+        </button>
         <a class="btn btn-ghost" href="/avatar" target="_blank" rel="noopener" title="VTuber avatar (beta) — drive a 3D avatar with your face">
           Avatar
         </a>
@@ -80,6 +85,13 @@
           </button>
           <span class="director-active mono" id="director-active"></span>
         </div>
+        <button type="button" class="btn btn-sm btn-highlight" id="btn-highlight" title="Save the last seconds as a replay highlight (Ctrl+Shift+H) — needs the OBS replay buffer">
+          ⚡ Highlight
+        </button>
+        <label class="toggle" title="Auto-save a highlight when motion spikes across the rig">
+          <input type="checkbox" id="auto-highlight" />
+          <span>Auto</span>
+        </label>
         <label class="toggle">
           <input type="checkbox" id="prefer-lan" checked />
           <span>Prefer LAN URLs</span>
@@ -103,6 +115,7 @@
   </div>
 
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
+  <script src="/static/js/bus.js?v={{ asset_v }}"></script>
   <script src="/static/js/app.js?v={{ asset_v }}"></script>
 </body>
 </html>

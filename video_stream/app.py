@@ -20,8 +20,8 @@ from typing import Any
 mimetypes.add_type("text/javascript", ".mjs")
 
 import uvicorn
-from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
@@ -29,8 +29,11 @@ from pydantic import BaseModel
 from video_stream import __version__
 from video_stream.camera import CameraManager
 from video_stream.director import Director, DirectorConfig
+from video_stream.hub import hub
 from video_stream.obs import OBSClient
 from video_stream.network import get_local_ips, primary_ip
+from video_stream.replay import ReplayConfig, ReplayDirector, ReplayError
+from video_stream.safety import SafetyBlocked, SafetyManager
 
 ROOT = Path(__file__).resolve().parent
 STATIC_DIR = ROOT / "static"
@@ -67,6 +70,9 @@ def _save_presets(items: list[dict[str, Any]]) -> None:
 
 manager = CameraManager()
 director: Director | None = None
+_director_lock = threading.Lock()  # serializes start/stop across threadpool workers
+safety = SafetyManager(on_change=lambda status: hub.emit("safety", status))
+replay: ReplayDirector | None = None
 config: dict[str, Any] = {
     "host": "0.0.0.0",
     "port": 8765,
@@ -82,15 +88,21 @@ config: dict[str, Any] = {
     "director_hold": 1.5,
     "director_cooldown": 3.0,
     "director_min_score": 0.02,
+    "director_auto_punch": False,
     "obs_host": "127.0.0.1",
     "obs_port": 4455,
     "obs_password": "",
     "obs_scene_map": {},
+    "replay_media_source": "",
+    "replay_lower_third": "",
+    "replay_lower_third_scene": "",
 }
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    # The Studio Bus needs the server loop so threads can emit safely.
+    hub.set_loop(asyncio.get_running_loop())
     manager.width = config["width"]
     manager.height = config["height"]
     manager.jpeg_quality = config["quality"]
@@ -106,6 +118,7 @@ async def lifespan(_app: FastAPI):
     def _startup() -> None:
         try:
             manager.discover(auto_start=True)
+            hub.emit("cameras", _camera_payload())
             if config["director"]:
                 start_director()
         except Exception as exc:  # never let startup kill the server
@@ -115,44 +128,93 @@ async def lifespan(_app: FastAPI):
 
     yield
 
+    if replay is not None:
+        replay.shutdown()
     stop_director()
     manager.stop_all()
 
 
 def start_director() -> None:
-    """Build and start the auto-director from current config. Idempotent."""
+    """Build and start the auto-director from current config. Idempotent.
+
+    Runs off the event loop (threadpool / startup thread), so the lock makes
+    the check-and-start atomic: two near-simultaneous toggles can otherwise
+    both pass the None check and leak an unstoppable ghost director thread.
+    """
     global director
-    if director is not None:
-        return
-    manager.set_motion_all(True)
-    obs = None
-    if not config["director_dry_run"]:
-        obs = OBSClient(
-            host=config["obs_host"],
-            port=config["obs_port"],
-            password=config["obs_password"],
+    with _director_lock:
+        if director is not None:
+            return
+        manager.set_motion_all(True)
+        obs = None
+        if not config["director_dry_run"]:
+            obs = OBSClient(
+                host=config["obs_host"],
+                port=config["obs_port"],
+                password=config["obs_password"],
+            )
+        director = Director(
+            manager,
+            obs_client=obs,
+            config=DirectorConfig(
+                scene_map=config["obs_scene_map"],
+                min_score=config["director_min_score"],
+                hold=config["director_hold"],
+                cooldown=config["director_cooldown"],
+                dry_run=config["director_dry_run"],
+            ),
+            safety=safety,
+            on_switch=_director_switched,
         )
-    director = Director(
-        manager,
-        obs_client=obs,
-        config=DirectorConfig(
-            scene_map=config["obs_scene_map"],
-            min_score=config["director_min_score"],
-            hold=config["director_hold"],
-            cooldown=config["director_cooldown"],
-            dry_run=config["director_dry_run"],
-        ),
+        director.start()
+
+
+def _director_switched(cam_index: int, scene: str, entry: dict) -> None:
+    """Runs on the director thread after every committed cut."""
+    if config["director_auto_punch"]:
+        stream = manager.get(cam_index)
+        if stream is not None and stream.active:
+            stream.punch_in()
+    d = director
+    hub.emit(
+        "director",
+        {"enabled": True, **d.status()} if d is not None else {"enabled": False},
     )
-    director.start()
 
 
 def stop_director() -> None:
     global director
-    if director is None:
-        return
-    director.stop()
-    director = None
-    manager.set_motion_all(False)
+    with _director_lock:
+        if director is None:
+            return
+        director.stop()
+        director = None
+        # Motion scoring is shared: replay auto-capture watches it too, so
+        # only shut it off when nobody else is listening.
+        if replay is None or not replay.auto_enabled:
+            manager.set_motion_all(False)
+
+
+def get_replay() -> ReplayDirector:
+    """Build the replay director on first use (its own OBS connection)."""
+    global replay
+    if replay is None:
+        replay = ReplayDirector(
+            obs=OBSClient(
+                host=config["obs_host"],
+                port=config["obs_port"],
+                password=config["obs_password"],
+            ),
+            config=ReplayConfig(
+                media_input=config["replay_media_source"],
+                lower_third_input=config["replay_lower_third"],
+                lower_third_scene=config["replay_lower_third_scene"],
+            ),
+            manager=manager,
+            safety=safety,
+            on_event=hub.emit,
+        )
+    return replay
 
 
 app = FastAPI(
@@ -164,6 +226,39 @@ app = FastAPI(
 
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
+
+
+@app.exception_handler(SafetyBlocked)
+async def _safety_blocked(_request: Request, exc: SafetyBlocked):
+    return JSONResponse(status_code=exc.status_code, content={"detail": exc.reason})
+
+
+@app.exception_handler(ReplayError)
+async def _replay_error(_request: Request, exc: ReplayError):
+    return JSONResponse(status_code=exc.status_code, content={"detail": str(exc)})
+
+
+@app.websocket("/ws")
+async def studio_bus(ws: WebSocket):
+    """The Studio Bus: pushes retained state on connect, then live events."""
+    queue = await hub.connect(ws)
+    pump = asyncio.create_task(hub.pump(ws, queue))
+    try:
+        while True:
+            # Inbound frames are ignored, but receive with receive() — the
+            # typed helpers raise KeyError on a frame of the other type.
+            message = await ws.receive()
+            if message.get("type") == "websocket.disconnect":
+                break
+    except WebSocketDisconnect:
+        pass
+    finally:
+        hub.disconnect(ws)
+        pump.cancel()
+        try:
+            await pump
+        except (asyncio.CancelledError, Exception):
+            pass
 
 
 def _base_urls(request: Request | None = None) -> list[dict[str, str]]:
@@ -219,6 +314,7 @@ def _camera_payload(request: Request | None = None) -> list[dict[str, Any]]:
                 "active": cam.active,
                 "error": cam.error,
                 "pose": cam.pose,
+                "zoom": cam.zoom,
                 "stream_url": f"{primary}/stream/{cam.index}",
                 "view_url": f"{primary}/view/{cam.index}",
                 "preview_url": f"/stream/{cam.index}",
@@ -326,9 +422,104 @@ async def avatar(request: Request):
 
 @app.get("/api/director")
 async def api_director():
-    if director is None:
+    d = director  # snapshot: a concurrent stop must not None us mid-read
+    if d is None:
         return {"enabled": False}
-    return {"enabled": True, **director.status()}
+    return {"enabled": True, **d.status()}
+
+
+# ── Safety: kill switch + automation budget ───────────────────────────
+class KillSwitch(BaseModel):
+    on: bool
+    reason: str | None = None
+
+
+@app.get("/api/safety")
+async def api_safety():
+    return safety.status()
+
+
+@app.post("/api/safety/kill")
+async def api_safety_kill(body: KillSwitch):
+    return safety.set_kill_switch(body.on, body.reason)
+
+
+@app.post("/api/safety/fallback-scene")
+async def api_safety_fallback():
+    """Panic cut: switch OBS to the configured safe scene. Human-initiated,
+    so it deliberately bypasses the kill switch and the rate limiter."""
+    scene = safety.fallback_scene
+    if not scene:
+        raise HTTPException(
+            status_code=400,
+            detail="No fallback scene configured (--safety-fallback-scene)",
+        )
+
+    def _cut() -> bool:
+        obs = OBSClient(
+            host=config["obs_host"],
+            port=config["obs_port"],
+            password=config["obs_password"],
+        )
+        try:
+            return obs.connect() and obs.set_scene(scene)
+        finally:
+            obs.close()
+
+    ok = await asyncio.to_thread(_cut)
+    if not ok:
+        raise HTTPException(
+            status_code=502, detail="Could not switch OBS to the fallback scene"
+        )
+    return {"ok": True, "scene": scene}
+
+
+# ── Replay highlights ─────────────────────────────────────────────────
+class ReplayRequest(BaseModel):
+    label: str | None = None
+
+
+@app.get("/api/replay")
+async def api_replay_status():
+    return get_replay().status()
+
+
+@app.post("/api/replay")
+async def api_replay_capture(body: ReplayRequest | None = None):
+    # OBS calls block; keep them off the event loop.
+    return await asyncio.to_thread(
+        get_replay().capture, body.label if body else None
+    )
+
+
+@app.post("/api/replay/auto")
+async def api_replay_auto(body: Toggle):
+    r = get_replay()
+    if body.enabled:
+        manager.set_motion_all(True)  # spikes need motion scores flowing
+    elif director is None:
+        manager.set_motion_all(False)  # only the watcher was using them
+    r.set_auto(body.enabled)
+    return r.status()
+
+
+# ── Smart Zoom: punch-ins baked into the stream ───────────────────────
+class ZoomTarget(BaseModel):
+    x: float = 0.5
+    y: float = 0.5
+    level: float = 2.0
+
+
+@app.post("/api/cameras/{index}/zoom")
+async def api_zoom(index: int, body: ZoomTarget):
+    stream = manager.get(index)
+    if stream is None:
+        raise HTTPException(status_code=404, detail="Camera not found")
+    # set_manual_zoom maps view→frame coords and cancels any pending
+    # auto-punch ease-back, so the director can't revert an operator's shot.
+    stream.set_manual_zoom(body.x, body.y, body.level)
+    hub.emit("cameras", _camera_payload())  # keep every dashboard's badges honest
+    return {"index": index, "zoom": round(stream.zoom.tzoom, 2)}
 
 
 # ── Avatar Studio: gallery of saved presets ───────────────────────────
@@ -390,6 +581,7 @@ async def api_toggle_pose(index: int, body: Toggle, request: Request):
     except Exception as exc:
         # Most likely MediaPipe not installed — surface the install hint.
         raise HTTPException(status_code=400, detail=str(exc))
+    hub.emit("cameras", _camera_payload())
     return {"camera": next(c for c in _camera_payload(request) if c["index"] == index)}
 
 
@@ -399,18 +591,21 @@ async def api_toggle_director():
         await asyncio.to_thread(start_director)  # OBS connect can block briefly
     else:
         await asyncio.to_thread(stop_director)
-    return {"enabled": director is not None} | (
-        director.status() if director is not None else {}
-    )
+    d = director  # snapshot: a concurrent toggle must not None us mid-read
+    state = {"enabled": d is not None} | (d.status() if d is not None else {})
+    hub.emit("director", state)
+    return state
 
 
 @app.post("/api/discover")
 async def api_discover(request: Request):
     # Probing camera indices is slow; run it in the background and return the
     # cameras we already know. The dashboard polls and picks up any new ones.
-    threading.Thread(
-        target=lambda: manager.discover(auto_start=True), name="rescan", daemon=True
-    ).start()
+    def _rescan() -> None:
+        manager.discover(auto_start=True)
+        hub.emit("cameras", _camera_payload())
+
+    threading.Thread(target=_rescan, name="rescan", daemon=True).start()
     return {"cameras": _camera_payload(request)}
 
 
@@ -421,6 +616,7 @@ async def api_start(index: int, request: Request):
         raise HTTPException(status_code=404, detail="Camera not found")
     if not info.active:
         raise HTTPException(status_code=500, detail=info.error or "Failed to start camera")
+    hub.emit("cameras", _camera_payload())
     return {"camera": next(c for c in _camera_payload(request) if c["index"] == index)}
 
 
@@ -429,6 +625,7 @@ async def api_stop(index: int, request: Request):
     info = await asyncio.to_thread(manager.stop, index)
     if info is None:
         raise HTTPException(status_code=404, detail="Camera not found")
+    hub.emit("cameras", _camera_payload())
     return {"camera": next(c for c in _camera_payload(request) if c["index"] == index)}
 
 
@@ -547,6 +744,38 @@ def build_parser() -> argparse.ArgumentParser:
         default=0.02,
         help="Motion score a camera must clear to be considered active (0–1)",
     )
+    p.add_argument(
+        "--director-auto-punch",
+        action="store_true",
+        help="After each director cut, punch in ~1.6x on the subject "
+        "(aims at the tracked face when the skeleton overlay is on)",
+    )
+    p.add_argument(
+        "--safety-fallback-scene",
+        default="",
+        help="OBS scene the dashboard panic button cuts to",
+    )
+    p.add_argument(
+        "--safety-max-actions",
+        type=int,
+        default=40,
+        help="Max automated OBS actions per rolling minute (default 40)",
+    )
+    p.add_argument(
+        "--replay-media-source",
+        default="",
+        help="OBS media source that instantly plays each saved replay (optional)",
+    )
+    p.add_argument(
+        "--replay-lower-third",
+        default="",
+        help="OBS text source updated with each replay's label (optional)",
+    )
+    p.add_argument(
+        "--replay-lower-third-scene",
+        default="",
+        help="Scene holding the lower-third source; shown then auto-hidden (optional)",
+    )
     p.add_argument("--reload", action="store_true", help="Dev auto-reload")
     p.add_argument(
         "--open",
@@ -649,12 +878,18 @@ def main(argv: list[str] | None = None) -> None:
             "director_hold": args.director_hold,
             "director_cooldown": args.director_cooldown,
             "director_min_score": args.director_min_score,
+            "director_auto_punch": args.director_auto_punch,
             "obs_host": args.obs_host,
             "obs_port": args.obs_port,
             "obs_password": args.obs_password,
             "obs_scene_map": _parse_scene_map(args.obs_scene_map),
+            "replay_media_source": args.replay_media_source,
+            "replay_lower_third": args.replay_lower_third,
+            "replay_lower_third_scene": args.replay_lower_third_scene,
         }
     )
+    safety.fallback_scene = args.safety_fallback_scene or None
+    safety.max_actions = max(1, args.safety_max_actions)
 
     if args.pose:
         _preflight_pose(args.pose_model)
