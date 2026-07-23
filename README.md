@@ -20,6 +20,7 @@ Broadcast every local camera over Wi‑Fi. Each stream gets a shareable URL you 
 - One-click **Copy** on every URL
 - Live mini previews in a sleek black UI
 - Start / stop per camera, rescan devices
+- Optional **live pose skeleton** overlay (motion tracking) that streams straight into OBS
 - One-command install + `video-stream` launcher that opens the app
 
 ## Install
@@ -169,8 +170,52 @@ video-stream --no-open
 | `--fps` | `30` | Target FPS |
 | `--quality` | `80` | JPEG quality (40–95) |
 | `--open` / `--no-open` | open | Open the dashboard in your browser |
+| `--pose` | off | Overlay a live pose skeleton on every camera (see [Pose overlay](#pose-overlay-motion-tracking)) |
+| `--pose-model` | `lite` | Pose model: `lite` (fast), `full`, or `heavy` (most accurate) |
+| `--pose-stride` | `2` | Run pose inference every Nth frame — higher = lighter CPU |
 
-Environment variables: `VIDEO_STREAM_HOST`, `VIDEO_STREAM_PORT`.
+Environment variables: `VIDEO_STREAM_HOST`, `VIDEO_STREAM_PORT`,
+`VIDEO_STREAM_CACHE` (where pose models are cached).
+
+## Pose overlay (motion tracking)
+
+Optional. Draws a live skeleton (33 body keypoints — shoulders, arms, torso, face)
+onto every camera feed using [MediaPipe](https://ai.google.dev/edge/mediapipe).
+Because the skeleton is drawn straight onto the frame **before** it's streamed, it
+flows through to OBS with no OBS-side setup — the same URLs, now with tracking.
+
+It's a separate add-on so the core rig install stays light. Install it once:
+
+```bash
+./install-pose.sh
+```
+
+Then run with `--pose`:
+
+```bash
+video-stream --pose                 # lite model, skeleton on every camera
+video-stream --pose --pose-model heavy   # slower, more accurate
+video-stream --pose --pose-stride 3      # lighter CPU (infer every 3rd frame)
+```
+
+The model (~5 MB for `lite`) downloads once on first use and is cached under
+`~/.cache/video-stream`.
+
+**Notes:**
+
+- **CPU cost.** Inference runs per camera. On a multi-camera rig, prefer `lite` and
+  a higher `--pose-stride`, or let each machine run pose only on its own cameras.
+  A GPU helps a lot.
+- **Why a separate installer?** MediaPipe depends on the *GUI* build of OpenCV, which
+  conflicts with the `opencv-python-headless` the rig uses (and reintroduces the
+  `libGL` error on headless Linux). `install-pose.sh` installs MediaPipe and then
+  restores the headless build so it owns `cv2`. Don't use `pip install .[pose]`
+  directly — it skips that fix-up.
+- **Graceful fallback.** If you pass `--pose` without MediaPipe installed, the app
+  prints how to install it and starts as a normal stream instead of crashing.
+
+Pose estimation is the first CV feature; object detection and background removal
+are natural next steps on the same per-frame hook in `video_stream/camera.py`.
 
 ## Firewall notes
 
@@ -290,9 +335,11 @@ See [Linux notes](#linux-notes) for the rest.
 ```
 video-stream/
 ├── install.sh          # one-shot setup + PATH launcher
+├── install-pose.sh     # optional pose-estimation add-on
 ├── video_stream/
 │   ├── app.py          # FastAPI routes + CLI
-│   ├── camera.py       # discovery & MJPEG capture
+│   ├── camera.py       # discovery & MJPEG capture (per-frame CV hook)
+│   ├── pose.py         # optional MediaPipe pose overlay
 │   ├── network.py      # LAN IP detection
 │   ├── static/         # CSS / JS
 │   └── templates/      # dashboard + OBS viewer

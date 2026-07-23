@@ -33,6 +33,9 @@ config: dict[str, Any] = {
     "height": 720,
     "quality": 80,
     "fps": 30.0,
+    "pose": False,
+    "pose_model": "lite",
+    "pose_stride": 2,
 }
 
 
@@ -42,6 +45,9 @@ async def lifespan(_app: FastAPI):
     manager.height = config["height"]
     manager.jpeg_quality = config["quality"]
     manager.target_fps = config["fps"]
+    manager.pose_enabled = config["pose"]
+    manager.pose_variant = config["pose_model"]
+    manager.pose_stride = config["pose_stride"]
     manager.discover(auto_start=True)
     yield
     manager.stop_all()
@@ -170,6 +176,8 @@ async def api_status(request: Request):
             "height": config["height"],
             "quality": config["quality"],
             "fps": config["fps"],
+            "pose": config["pose"],
+            "pose_model": config["pose_model"],
         },
     }
 
@@ -260,6 +268,23 @@ def build_parser() -> argparse.ArgumentParser:
         default=80,
         help="JPEG quality 40–95 (default 80)",
     )
+    p.add_argument(
+        "--pose",
+        action="store_true",
+        help="Overlay a live pose skeleton on every camera (needs MediaPipe)",
+    )
+    p.add_argument(
+        "--pose-model",
+        choices=("lite", "full", "heavy"),
+        default="lite",
+        help="Pose model: lite (fast, default), full, or heavy (most accurate)",
+    )
+    p.add_argument(
+        "--pose-stride",
+        type=int,
+        default=2,
+        help="Run pose inference every Nth frame (default 2); higher = lighter CPU",
+    )
     p.add_argument("--reload", action="store_true", help="Dev auto-reload")
     p.add_argument(
         "--open",
@@ -290,6 +315,28 @@ def _open_dashboard(port: int, delay: float = 1.0) -> None:
     threading.Thread(target=_run, name="open-browser", daemon=True).start()
 
 
+def _preflight_pose(variant: str) -> None:
+    """Check pose deps once at startup so failures are loud, not silent.
+
+    If MediaPipe is missing we print how to install it and turn pose off, so the
+    rig still comes up as a normal stream instead of crashing.
+    """
+    try:
+        from video_stream.pose import _INSTALL_HINT  # noqa: F401
+
+        import mediapipe  # noqa: F401
+    except ImportError:
+        from video_stream.pose import _INSTALL_HINT
+
+        print("\n  [pose] requested but unavailable —")
+        for line in _INSTALL_HINT.splitlines():
+            print(f"  {line}")
+        print("  [pose] continuing WITHOUT pose overlay.\n")
+        config["pose"] = False
+        return
+    print(f"  [pose] enabled · model={variant} · overlay flows through to OBS")
+
+
 def main(argv: list[str] | None = None) -> None:
     args = build_parser().parse_args(argv)
     config.update(
@@ -300,8 +347,14 @@ def main(argv: list[str] | None = None) -> None:
             "height": args.height,
             "quality": args.quality,
             "fps": args.fps,
+            "pose": args.pose,
+            "pose_model": args.pose_model,
+            "pose_stride": args.pose_stride,
         }
     )
+
+    if args.pose:
+        _preflight_pose(args.pose_model)
 
     lan = primary_ip()
     print()

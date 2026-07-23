@@ -28,6 +28,11 @@ dependencies = [
   "python-multipart>=0.0.12",
 ]
 
+[project.optional-dependencies]
+# Pose estimation. Note: `pip install .[pose]` will pull in the GUI OpenCV build;
+# use ./install-pose.sh instead, which restores opencv-python-headless afterward.
+pose = ["mediapipe>=0.10.30"]
+
 [project.urls]
 Homepage = "https://github.com/lalomorales22/video-stream"
 Repository = "https://github.com/lalomorales22/video-stream"

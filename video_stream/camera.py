@@ -82,6 +82,9 @@ class CameraStream:
         height: int = 720,
         jpeg_quality: int = 80,
         target_fps: float = 30.0,
+        pose_enabled: bool = False,
+        pose_variant: str = "lite",
+        pose_stride: int = 2,
     ) -> None:
         self.index = index
         self.name = name
@@ -89,6 +92,10 @@ class CameraStream:
         self.requested_height = height
         self.jpeg_quality = max(40, min(95, jpeg_quality))
         self.target_fps = target_fps
+        self.pose_enabled = pose_enabled
+        self.pose_variant = pose_variant
+        self.pose_stride = pose_stride
+        self._pose = None  # built lazily on start(), owned by the capture thread
         self.stats = StreamStats()
 
         self._cap: cv2.VideoCapture | None = None
@@ -148,10 +155,12 @@ class CameraStream:
         self._actual_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or frame.shape[0])
         self._actual_fps = float(cap.get(cv2.CAP_PROP_FPS) or self.target_fps)
 
+        self._maybe_init_pose()
+
         self._cap = cap
         self._running = True
         self._error = None
-        self._encode_frame(frame)
+        self._encode_frame(self._apply_pose(frame))
 
         self._thread = threading.Thread(
             target=self._capture_loop,
@@ -169,9 +178,40 @@ class CameraStream:
         if self._cap is not None:
             self._cap.release()
             self._cap = None
+        if self._pose is not None:
+            self._pose.close()
+            self._pose = None
         with self._lock:
             self._frame = None
             self._jpeg = None
+
+    def _maybe_init_pose(self) -> None:
+        """Build the pose overlay for this stream if enabled. Never fatal."""
+        if not self.pose_enabled or self._pose is not None:
+            return
+        try:
+            from video_stream.pose import PoseOverlay, PoseUnavailable
+        except Exception:
+            return
+        try:
+            self._pose = PoseOverlay(
+                variant=self.pose_variant,
+                stride=self.pose_stride,
+                fps=self.target_fps,
+            )
+        except PoseUnavailable as exc:
+            # Degrade to a plain stream rather than taking the camera down.
+            print(f"[pose] camera {self.index}: disabled — {exc}")
+            self._pose = None
+            self.pose_enabled = False
+
+    def _apply_pose(self, frame: np.ndarray) -> np.ndarray:
+        if self._pose is None:
+            return frame
+        try:
+            return self._pose.process(frame)
+        except Exception:
+            return frame
 
     def _capture_loop(self) -> None:
         interval = 1.0 / max(1.0, self.target_fps)
@@ -185,7 +225,7 @@ class CameraStream:
                 time.sleep(0.02)
                 continue
 
-            self._encode_frame(frame)
+            self._encode_frame(self._apply_pose(frame))
             self.stats.frames += 1
             now = time.time()
             self.stats.last_frame_at = now
@@ -280,12 +320,18 @@ class CameraManager:
         height: int = 720,
         jpeg_quality: int = 80,
         target_fps: float = 30.0,
+        pose_enabled: bool = False,
+        pose_variant: str = "lite",
+        pose_stride: int = 2,
     ) -> None:
         self.max_probe = max_probe
         self.width = width
         self.height = height
         self.jpeg_quality = jpeg_quality
         self.target_fps = target_fps
+        self.pose_enabled = pose_enabled
+        self.pose_variant = pose_variant
+        self.pose_stride = pose_stride
         self._streams: dict[int, CameraStream] = {}
         self._lock = threading.Lock()
 
@@ -328,6 +374,9 @@ class CameraManager:
                 height=self.height,
                 jpeg_quality=self.jpeg_quality,
                 target_fps=self.target_fps,
+                pose_enabled=self.pose_enabled,
+                pose_variant=self.pose_variant,
+                pose_stride=self.pose_stride,
             )
             with self._lock:
                 self._streams[index] = stream
