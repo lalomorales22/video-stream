@@ -6,9 +6,13 @@
   const hostPill = document.getElementById("host-pill");
   const preferLan = document.getElementById("prefer-lan");
   const btnRefresh = document.getElementById("btn-refresh");
+  const btnDirector = document.getElementById("btn-director");
+  const directorLabel = document.getElementById("director-label");
+  const directorActive = document.getElementById("director-active");
   const toastEl = document.getElementById("toast");
 
   let state = { cameras: [], bases: [], port: 8765, primary_ip: "127.0.0.1" };
+  let directorState = { enabled: false, active: null, dry_run: false, obs_connected: false };
   let toastTimer = null;
 
   function toast(message, ok = true) {
@@ -73,8 +77,9 @@
     const status = camera.active ? "LIVE" : camera.error ? "ERROR" : "OFF";
     const previewSrc = camera.active ? `/stream/${camera.index}?t=${Date.now()}` : "";
 
+    const onAir = directorState.enabled && directorState.active === camera.index;
     const card = document.createElement("article");
-    card.className = `card${camera.active ? "" : " offline"}`;
+    card.className = `card${camera.active ? "" : " offline"}${onAir ? " on-air" : ""}`;
     card.dataset.index = String(camera.index);
     card.innerHTML = `
       <div class="preview-wrap">
@@ -124,6 +129,9 @@
           <a class="btn btn-sm" href="/view/${camera.index}" target="_blank" rel="noopener">Open view</a>
           <button type="button" class="btn btn-sm" data-action="toggle" data-index="${camera.index}">
             ${camera.active ? "Stop" : "Start"}
+          </button>
+          <button type="button" class="btn btn-sm btn-pose${camera.pose ? " on" : ""}" data-action="pose" data-index="${camera.index}" ${camera.active ? "" : "disabled"}>
+            ${camera.pose ? "Skeleton ·on" : "Skeleton"}
           </button>
           <button type="button" class="btn btn-sm btn-signal" data-action="copy-view" data-index="${camera.index}">
             Copy OBS URL
@@ -187,6 +195,29 @@
             btn.disabled = false;
           }
         }
+        if (action === "pose") {
+          const cam = state.cameras.find((c) => c.index === index);
+          const turnOn = !cam?.pose;
+          btn.disabled = true;
+          try {
+            const res = await fetch(`/api/cameras/${index}/pose`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ enabled: turnOn }),
+            });
+            if (!res.ok) {
+              const body = await res.json().catch(() => ({}));
+              // MediaPipe missing → show the first line of the install hint
+              throw new Error(String(body.detail || "Pose toggle failed").split("\n")[0]);
+            }
+            toast(turnOn ? "Skeleton on" : "Skeleton off");
+            await refresh();
+          } catch (err) {
+            toast(err.message || "Pose unavailable — run ./install-pose.sh", false);
+          } finally {
+            btn.disabled = false;
+          }
+        }
       });
     });
 
@@ -234,6 +265,53 @@
     }
   }
 
+  function renderDirector() {
+    const on = directorState.enabled;
+    btnDirector?.setAttribute("aria-pressed", on ? "true" : "false");
+    btnDirector?.classList.toggle("on", on);
+    if (directorLabel) directorLabel.textContent = on ? "Auto-director: On" : "Auto-director: Off";
+    // Update the "on air" ring on existing cards WITHOUT rebuilding them
+    // (rebuilding would detach buttons mid-click and flicker the previews).
+    grid.querySelectorAll(".card").forEach((card) => {
+      const idx = Number(card.dataset.index);
+      card.classList.toggle("on-air", on && directorState.active === idx);
+    });
+    if (directorActive) {
+      if (!on) {
+        directorActive.textContent = "";
+      } else {
+        const cam =
+          directorState.active != null
+            ? state.cameras.find((c) => c.index === directorState.active)
+            : null;
+        const who = cam ? cam.name : directorState.active != null ? `cam ${directorState.active}` : "…";
+        const mode = directorState.dry_run
+          ? "dry-run"
+          : directorState.obs_connected
+          ? "→ OBS"
+          : "no OBS";
+        directorActive.textContent = `on air: ${who} · ${mode}`;
+      }
+    }
+  }
+
+  async function refreshDirector() {
+    try {
+      const res = await fetch("/api/director");
+      if (!res.ok) return;
+      const d = await res.json();
+      directorState = {
+        enabled: !!d.enabled,
+        active: d.active ?? null,
+        dry_run: !!d.dry_run,
+        obs_connected: !!d.obs_connected,
+      };
+      renderDirector(); // updates on-air ring in place, no card rebuild
+    } catch {
+      /* ignore */
+    }
+  }
+
   preferLan?.addEventListener("change", () => render());
   btnRefresh?.addEventListener("click", async () => {
     btnRefresh.disabled = true;
@@ -245,7 +323,27 @@
     }
   });
 
+  btnDirector?.addEventListener("click", async () => {
+    btnDirector.disabled = true;
+    try {
+      const res = await fetch("/api/director", { method: "POST" });
+      if (!res.ok) throw new Error("Director toggle failed");
+      const d = await res.json();
+      toast(d.enabled ? "Auto-director on" : "Auto-director off");
+      await refreshDirector();
+    } catch (err) {
+      toast(err.message || "Director toggle failed", false);
+    } finally {
+      btnDirector.disabled = false;
+    }
+  });
+
   refresh();
+  refreshDirector();
   // Soft poll for status (previews are live MJPEG; this keeps badges/URLs fresh)
   setInterval(() => refresh(), 8000);
+  // Director status ticks faster so the "on air" camera stays current
+  setInterval(() => {
+    if (directorState.enabled) refreshDirector();
+  }, 2000);
 })();

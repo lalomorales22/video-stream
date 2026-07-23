@@ -16,6 +16,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from pydantic import BaseModel
 
 from video_stream import __version__
 from video_stream.camera import CameraManager
@@ -26,6 +27,10 @@ from video_stream.network import get_local_ips, primary_ip
 ROOT = Path(__file__).resolve().parent
 STATIC_DIR = ROOT / "static"
 TEMPLATES_DIR = ROOT / "templates"
+
+class Toggle(BaseModel):
+    enabled: bool
+
 
 manager = CameraManager()
 director: Director | None = None
@@ -63,33 +68,49 @@ async def lifespan(_app: FastAPI):
     manager.motion_enabled = config["director"]  # scoring only when directing
     manager.discover(auto_start=True)
 
-    global director
     if config["director"]:
-        obs = None
-        if not config["director_dry_run"]:
-            obs = OBSClient(
-                host=config["obs_host"],
-                port=config["obs_port"],
-                password=config["obs_password"],
-            )
-        director = Director(
-            manager,
-            obs_client=obs,
-            config=DirectorConfig(
-                scene_map=config["obs_scene_map"],
-                min_score=config["director_min_score"],
-                hold=config["director_hold"],
-                cooldown=config["director_cooldown"],
-                dry_run=config["director_dry_run"],
-            ),
-        )
-        director.start()
+        start_director()
 
     yield
 
-    if director is not None:
-        director.stop()
+    stop_director()
     manager.stop_all()
+
+
+def start_director() -> None:
+    """Build and start the auto-director from current config. Idempotent."""
+    global director
+    if director is not None:
+        return
+    manager.set_motion_all(True)
+    obs = None
+    if not config["director_dry_run"]:
+        obs = OBSClient(
+            host=config["obs_host"],
+            port=config["obs_port"],
+            password=config["obs_password"],
+        )
+    director = Director(
+        manager,
+        obs_client=obs,
+        config=DirectorConfig(
+            scene_map=config["obs_scene_map"],
+            min_score=config["director_min_score"],
+            hold=config["director_hold"],
+            cooldown=config["director_cooldown"],
+            dry_run=config["director_dry_run"],
+        ),
+    )
+    director.start()
+
+
+def stop_director() -> None:
+    global director
+    if director is None:
+        return
+    director.stop()
+    director = None
+    manager.set_motion_all(False)
 
 
 app = FastAPI(
@@ -155,6 +176,7 @@ def _camera_payload(request: Request | None = None) -> list[dict[str, Any]]:
                 "fps": round(cam.fps, 1),
                 "active": cam.active,
                 "error": cam.error,
+                "pose": cam.pose,
                 "stream_url": f"{primary}/stream/{cam.index}",
                 "view_url": f"{primary}/view/{cam.index}",
                 "preview_url": f"/stream/{cam.index}",
@@ -172,6 +194,18 @@ def _camera_payload(request: Request | None = None) -> list[dict[str, Any]]:
     return cameras
 
 
+def _asset_version() -> str:
+    """Cache-busting token from static file mtimes, so browsers pick up updates
+    (e.g. after a git pull) instead of serving a stale cached bundle."""
+    try:
+        latest = max(
+            f.stat().st_mtime for f in STATIC_DIR.rglob("*") if f.is_file()
+        )
+        return str(int(latest))
+    except ValueError:
+        return __version__
+
+
 @app.get("/", response_class=HTMLResponse)
 async def dashboard(request: Request):
     return templates.TemplateResponse(
@@ -179,6 +213,7 @@ async def dashboard(request: Request):
         "index.html",
         {
             "version": __version__,
+            "asset_v": _asset_version(),
             "port": config["port"],
             "primary_ip": primary_ip(),
             "bases": _base_urls(request),
@@ -226,6 +261,30 @@ async def api_director():
     if director is None:
         return {"enabled": False}
     return {"enabled": True, **director.status()}
+
+
+@app.post("/api/cameras/{index}/pose")
+async def api_toggle_pose(index: int, body: Toggle, request: Request):
+    stream = manager.get(index)
+    if stream is None:
+        raise HTTPException(status_code=404, detail="Camera not found")
+    try:
+        stream.set_pose(body.enabled)
+    except Exception as exc:
+        # Most likely MediaPipe not installed — surface the install hint.
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"camera": next(c for c in _camera_payload(request) if c["index"] == index)}
+
+
+@app.post("/api/director")
+async def api_toggle_director():
+    if director is None:
+        start_director()
+    else:
+        stop_director()
+    return {"enabled": director is not None} | (
+        director.status() if director is not None else {}
+    )
 
 
 @app.post("/api/discover")

@@ -60,6 +60,7 @@ class CameraInfo:
     fps: float = 0.0
     active: bool = False
     error: str | None = None
+    pose: bool = False
 
 
 @dataclass
@@ -132,6 +133,7 @@ class CameraStream:
             fps=self._actual_fps or self.stats.fps,
             active=self.active,
             error=self._error,
+            pose=self._pose is not None,
         )
 
     def start(self) -> bool:
@@ -220,6 +222,39 @@ class CameraStream:
             return self._pose.process(frame)
         except Exception:
             return frame
+
+    def set_pose(self, enabled: bool) -> None:
+        """Turn the pose overlay on/off while the stream is running.
+
+        Raises PoseUnavailable if MediaPipe can't be loaded, so callers can
+        surface a clear message.
+        """
+        if not enabled:
+            self.pose_enabled = False
+            pose, self._pose = self._pose, None
+            if pose is not None:
+                pose.close()
+            return
+        self.pose_enabled = True
+        if self._pose is not None or not self._running:
+            return  # already on, or will be built on start()
+        from video_stream.pose import PoseOverlay
+
+        self._pose = PoseOverlay(
+            variant=self.pose_variant, stride=self.pose_stride, fps=self.target_fps
+        )
+
+    def set_motion(self, enabled: bool) -> None:
+        """Turn cheap motion scoring on/off (used by the auto-director)."""
+        self.motion_enabled = enabled
+        if not enabled:
+            self._motion = None
+            self.motion_score = 0.0
+            return
+        if self._motion is None and self._running:
+            from video_stream.motion import MotionScorer
+
+            self._motion = MotionScorer()
 
     def _capture_loop(self) -> None:
         interval = 1.0 / max(1.0, self.target_fps)
@@ -430,6 +465,14 @@ class CameraManager:
             streams = list(self._streams.values())
         for stream in streams:
             stream.stop()
+
+    def set_motion_all(self, enabled: bool) -> None:
+        """Enable/disable motion scoring on every stream (for the director)."""
+        self.motion_enabled = enabled
+        with self._lock:
+            streams = list(self._streams.values())
+        for stream in streams:
+            stream.set_motion(enabled)
 
     def _probe_name(self, index: int) -> str | None:
         # If already known and was valid, keep it

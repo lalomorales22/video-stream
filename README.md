@@ -202,6 +202,10 @@ video-stream --pose --pose-stride 3      # lighter CPU (infer every 3rd frame)
 The model (~5 MB for `lite`) downloads once on first use and is cached under
 `~/.cache/video-stream`.
 
+You can also toggle the skeleton **per camera at runtime** with the **Skeleton**
+button on each card in the dashboard — no restart, no flag. (`--pose` just turns it
+on for every camera at startup.)
+
 **Notes:**
 
 - **CPU cost.** Inference runs per camera. On a multi-camera rig, prefer `lite` and
@@ -224,6 +228,11 @@ Turns a multi-camera rig into a self-operating one: it scores motion on each cam
 and automatically switches OBS to whichever one is **active** — no keyboard, no
 second operator. It talks to OBS over the built-in [OBS WebSocket](https://github.com/obsproject/obs-websocket),
 so no extra dependency is needed.
+
+**Toggle it from the dashboard.** The **Auto-director** button in the toolbar turns it
+on/off live, and the selected camera gets an **ON AIR** ring so you can see what it's
+choosing. (Wiring to real OBS still needs the scene map + password below, best passed
+at startup.)
 
 **Try it first in dry-run** (watch it decide without touching OBS):
 

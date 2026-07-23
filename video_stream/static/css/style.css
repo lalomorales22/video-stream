@@ -407,6 +407,70 @@ input {
   font-size: 0.75rem;
 }
 
+/* Pose / skeleton toggle — cyan when active */
+.btn-pose.on {
+  color: var(--cyan);
+  border-color: rgba(79, 209, 197, 0.45);
+  background: var(--cyan-dim);
+}
+.btn-pose.on:hover {
+  background: rgba(79, 209, 197, 0.18);
+}
+.btn[disabled] {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* Auto-director control */
+.director-control {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+.director-btn .dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--faint);
+  transition: background 0.15s ease, box-shadow 0.15s ease;
+}
+.director-btn.on {
+  color: var(--signal);
+  border-color: var(--signal-glow);
+  background: var(--signal-dim);
+}
+.director-btn.on .dot {
+  background: var(--signal);
+  box-shadow: 0 0 8px var(--signal-glow);
+  animation: core-pulse 1.4s ease-in-out infinite;
+}
+.director-active {
+  font-size: 0.72rem;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+/* "On air" card highlight when the director selects a camera */
+.card.on-air {
+  outline: 2px solid var(--signal);
+  outline-offset: 2px;
+  box-shadow: 0 0 0 1px var(--signal-dim), 0 18px 50px rgba(255, 61, 110, 0.2);
+}
+.card.on-air::after {
+  content: "ON AIR";
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  z-index: 3;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: var(--signal);
+  color: #fff;
+  font: 700 0.62rem/1 var(--font-mono);
+  letter-spacing: 0.08em;
+  box-shadow: 0 4px 14px var(--signal-glow);
+}
+
 /* ── Camera grid ─────────────────────────────────────── */
 
 .camera-grid {
@@ -449,6 +513,7 @@ input {
 /* ── Card ────────────────────────────────────────────── */
 
 .card {
+  position: relative;
   background: var(--panel);
   border: 1px solid var(--line);
   border-radius: var(--radius);
