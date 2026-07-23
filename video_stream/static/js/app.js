@@ -198,6 +198,10 @@
         if (action === "pose") {
           const cam = state.cameras.find((c) => c.index === index);
           const turnOn = !cam?.pose;
+          // Optimistic: flip the button now so it feels instant, revert on failure.
+          if (cam) cam.pose = turnOn;
+          btn.classList.toggle("on", turnOn);
+          btn.textContent = turnOn ? "Skeleton ·on" : "Skeleton";
           btn.disabled = true;
           try {
             const res = await fetch(`/api/cameras/${index}/pose`, {
@@ -211,8 +215,11 @@
               throw new Error(String(body.detail || "Pose toggle failed").split("\n")[0]);
             }
             toast(turnOn ? "Skeleton on" : "Skeleton off");
-            await refresh();
           } catch (err) {
+            // Revert the optimistic flip.
+            if (cam) cam.pose = !turnOn;
+            btn.classList.toggle("on", !turnOn);
+            btn.textContent = !turnOn ? "Skeleton ·on" : "Skeleton";
             toast(err.message || "Pose unavailable — run ./install-pose.sh", false);
           } finally {
             btn.disabled = false;
@@ -316,8 +323,14 @@
   btnRefresh?.addEventListener("click", async () => {
     btnRefresh.disabled = true;
     try {
-      await refresh({ discover: true });
-      toast("Camera list refreshed");
+      await refresh({ discover: true }); // kicks off a background rescan
+      toast("Rescanning…");
+      // Discovery runs in the background now — poll a few times to pick up new cams.
+      let n = 0;
+      const t = setInterval(async () => {
+        await refresh();
+        if (++n >= 6) clearInterval(t);
+      }, 1500);
     } finally {
       btnRefresh.disabled = false;
     }

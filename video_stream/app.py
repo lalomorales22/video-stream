@@ -250,7 +250,7 @@ def _asset_version() -> str:
 
 @app.get("/", response_class=HTMLResponse)
 async def dashboard(request: Request):
-    return templates.TemplateResponse(
+    resp = templates.TemplateResponse(
         request,
         "index.html",
         {
@@ -261,6 +261,9 @@ async def dashboard(request: Request):
             "bases": _base_urls(request),
         },
     )
+    # Always revalidate the HTML so the cache-busted JS/CSS tokens are never stale.
+    resp.headers["Cache-Control"] = "no-cache"
+    return resp
 
 
 @app.get("/view/{index}", response_class=HTMLResponse)
@@ -314,9 +317,11 @@ async def avatar(request: Request):
             "<p>Then reload this page. See <code>path_b.md</code> for details.</p></body>",
             status_code=503,
         )
-    return templates.TemplateResponse(
+    resp = templates.TemplateResponse(
         request, "avatar.html", {"asset_v": _asset_version()}
     )
+    resp.headers["Cache-Control"] = "no-cache"
+    return resp
 
 
 @app.get("/api/director")
@@ -401,7 +406,11 @@ async def api_toggle_director():
 
 @app.post("/api/discover")
 async def api_discover(request: Request):
-    await asyncio.to_thread(manager.discover, True)
+    # Probing camera indices is slow; run it in the background and return the
+    # cameras we already know. The dashboard polls and picks up any new ones.
+    threading.Thread(
+        target=lambda: manager.discover(auto_start=True), name="rescan", daemon=True
+    ).start()
     return {"cameras": _camera_payload(request)}
 
 
