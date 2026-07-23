@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>video-stream · phone camera view</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { height: 100%; background: #000; overflow: hidden; font-family: -apple-system, "Segoe UI", sans-serif; }
+    #feed { position: fixed; inset: 0; width: 100%; height: 100%; object-fit: cover; background: #000; }
+    /* Hover-only chrome, like /view pages: invisible to OBS captures. */
+    #chrome {
+      position: fixed;
+      left: 12px;
+      bottom: 12px;
+      padding: 8px 14px;
+      border-radius: 999px;
+      background: rgba(0, 0, 0, 0.65);
+      color: #ececf1;
+      font-size: 13px;
+      font-weight: 600;
+      opacity: 0;
+      transition: opacity 0.2s ease;
+      pointer-events: none;
+    }
+    body:hover #chrome { opacity: 1; }
+    #chrome .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #5c5c6a; margin-right: 7px; }
+    #chrome.live .dot { background: #ff3d6e; animation: pulse 1.4s ease infinite; }
+    @keyframes pulse { 50% { opacity: 0.5; } }
+  </style>
+</head>
+<body>
+  <video id="feed" autoplay playsinline muted></video>
+  <div id="chrome"><span class="dot"></span><span id="chrome-text">waiting for the phone…</span></div>
+
+  <script>
+    const params = new URLSearchParams(location.search);
+    const session = params.get("session") || "";
+    const feed = document.getElementById("feed");
+    const chrome = document.getElementById("chrome");
+    const chromeText = document.getElementById("chrome-text");
+    // ?audio=1 unmutes the phone's mic — use it on the OBS browser source
+    // (with "Control audio via OBS"); browser tabs stay muted by default.
+    if (params.get("audio") === "1") feed.muted = false;
+
+    let ws = null;
+    let pc = null;
+    let wsDelay = 500;
+
+    function setState(live, text) {
+      chrome.classList.toggle("live", live);
+      chromeText.textContent = text;
+    }
+
+    // Persistent answerer: the signaling socket stays open for the session's
+    // lifetime and EVERY offer gets an answer (flip-camera and reconnects
+    // re-offer from scratch) — the one-shot receiver was the source's bug.
+    function connectSignaling() {
+      if (!session) {
+        setState(false, "missing ?session= in the URL");
+        return;
+      }
+      const proto = location.protocol === "https:" ? "wss" : "ws";
+      ws = new WebSocket(`${proto}://${location.host}/phone-signal?session=${session}&role=desktop`);
+      ws.onopen = () => {
+        wsDelay = 500;
+        // Announce ourselves: a phone already waiting re-offers immediately,
+        // so it never matters which side opened first.
+        ws.send(JSON.stringify({ type: "ready" }));
+      };
+      ws.onmessage = async (event) => {
+        let msg;
+        try {
+          msg = JSON.parse(String(event.data));
+        } catch {
+          return;
+        }
+        if (msg.type === "offer") {
+          try { pc?.close(); } catch {}
+          const iceQueue = [];
+          let remoteSet = false;
+          pc = new RTCPeerConnection({ iceServers: [{ urls: "stun:stun.l.google.com:19302" }] });
+          const thisPc = pc;
+          setState(false, "phone found — connecting…");
+          thisPc.onicecandidate = (e) => {
+            if (e.candidate) ws?.send(JSON.stringify({ type: "ice", candidate: e.candidate }));
+          };
+          thisPc.ontrack = (e) => {
+            const stream = e.streams[0];
+            if (stream && stream.getVideoTracks().length) {
+              feed.srcObject = stream; // swap on every (re)connect
+            }
+          };
+          thisPc.onconnectionstatechange = () => {
+            if (thisPc !== pc) return; // superseded by a newer offer
+            if (thisPc.connectionState === "connected") setState(true, "phone live");
+            else if (thisPc.connectionState === "disconnected") setState(false, "phone dropped — waiting…");
+            else if (thisPc.connectionState === "failed") setState(false, "connection failed — same Wi-Fi?");
+          };
+          // Queue ICE until the remote description lands (the source dropped
+          // early candidates silently); attach the handler before awaiting.
+          thisPc._flushIce = async () => {
+            while (iceQueue.length) {
+              await thisPc.addIceCandidate(iceQueue.shift()).catch(() => {});
+            }
+          };
+          thisPc._queueIce = (candidate) => {
+            if (remoteSet) thisPc.addIceCandidate(candidate).catch(() => {});
+            else iceQueue.push(candidate);
+          };
+          await thisPc.setRemoteDescription(msg.sdp);
+          remoteSet = true;
+          await thisPc._flushIce();
+          const answer = await thisPc.createAnswer();
+          await thisPc.setLocalDescription(answer);
+          ws?.send(JSON.stringify({ type: "answer", sdp: thisPc.localDescription }));
+        } else if (msg.type === "ice" && pc && pc._queueIce) {
+          pc._queueIce(msg.candidate);
+        }
+      };
+      ws.onclose = () => {
+        setTimeout(connectSignaling, wsDelay);
+        wsDelay = Math.min(5000, wsDelay + 500);
+      };
+      ws.onerror = () => {
+        try { ws.close(); } catch {}
+      };
+    }
+
+    connectSignaling();
+  </script>
+</body>
+</html>

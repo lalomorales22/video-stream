@@ -56,6 +56,14 @@ Broadcast every local camera over Wi‑Fi. Each stream gets a shareable URL you 
 - [**Setup wizard & settings**](#setup-wizard--runtime-settings) — scan → propose a scene map → verify
   the rig with a pass/fail checklist; edit everything from the dashboard (secrets masked, optional
   shared-token auth)
+- [**Rig Link**](#rig-link-multi-machine-directing) — the director on your OBS box reacts to motion on
+  cameras plugged into *other* machines: `--peers studio=192.168.1.42:8765` and rules like
+  `motion:studio:1` cut on remote movement
+- [**Phone as camera**](#phone-as-camera) — scan a QR and any phone becomes a wireless camera over
+  WebRTC; the view page drops straight into OBS as a Browser Source
+- [**Chaos engine**](#chaos-engine-fx--obs-choreography) — one-click fullscreen effects (confetti,
+  glitch, matrix…) plus shareable JSON presets that choreograph OBS itself — scene slams, BRB
+  sequences, intros — all behind the kill switch
 
 ## Install
 
@@ -208,9 +216,13 @@ video-stream --no-open
 | `--pose-model` | `lite` | Pose model: `lite` (fast), `full`, or `heavy` (most accurate) |
 | `--pose-stride` | `2` | Run pose inference every Nth frame — higher = lighter CPU |
 | `--director` + `--obs-*` | off | Auto-director (see [Auto-director](#auto-director-hands-free-camera-switching)) |
+| `--director-rules` | *(off)* | Hybrid audio+motion rules JSON (see [Hybrid director rules](#hybrid-director-rules-audio--motion)) |
 | `--director-auto-punch` | off | Punch in on the subject after each director cut (see [Smart Zoom](#smart-zoom-punch-ins)) |
+| `--peers` | *(off)* | Rig Link peers, e.g. `"studio=192.168.1.42:8765"` (see [Rig Link](#rig-link-multi-machine-directing)) |
 | `--safety-*` | see below | Kill switch fallback scene + automation budget (see [Safety](#kill-switch--automation-budget)) |
 | `--replay-*` | see below | Replay highlight garnish sources (see [Replay highlights](#replay-highlights)) |
+| `--phone-https-port` | `8766` | HTTPS port for phone pages (see [Phone as camera](#phone-as-camera)) |
+| `--ssl-certfile` / `--ssl-keyfile` | auto | TLS cert override; default is what `./install-phone.sh` generates |
 
 Environment variables: `VIDEO_STREAM_HOST`, `VIDEO_STREAM_PORT`,
 `VIDEO_STREAM_CACHE` (where pose models are cached).
@@ -385,6 +397,74 @@ for its `hold`, and cuts respect the global `cooldown`. The dashboard (and `GET
 /api/director`) shows `last_decision` — `pending:mic_cam`, `hysteresis-hold:…`,
 `switch:Camera` — so the director is never a black box. Audio input names match
 case-insensitively.
+
+### Rig Link (multi-machine directing)
+
+Run video-stream on every camera machine, and one more on the OBS box with the
+director. The OBS-box director already hears audio (its OBS inputs are local) — the
+Rig Link adds *remote motion*: it polls each peer's `GET /api/signals` a few times a
+second (switching the peer's motion scoring on automatically) and folds the scores
+into its signal map as `motion:<peer>:<index>`.
+
+```bash
+# On the OBS box:
+video-stream --director --director-rules rules.json \
+  --peers "studio=192.168.1.42:8765,den=10.0.0.9:8765"
+```
+
+```json
+{ "source": "motion:studio:1", "scene": "Studio Wide", "threshold": 0.05 }
+```
+
+Peers can also be set from the dashboard (Settings → `peers`). A dead peer's signals
+simply go stale and drop out of candidacy within ~2 s; the Setup panel's *Verify rig*
+checks every peer's reachability.
+
+## Phone as camera
+
+One-time setup: `./install-phone.sh` (generates a self-signed certificate — phones
+only allow camera access on secure pages), then restart. After that:
+
+1. Click **📱 Add phone** on the dashboard and scan the QR with the phone
+   (same Wi-Fi; accept the certificate warning once, allow the camera).
+2. Copy the **view URL** from the panel into OBS as a **Browser Source** —
+   that page shows the phone's camera full-bleed, live over WebRTC.
+
+Flip between front/back cameras from the phone; the view page reconnects
+automatically, and it no longer matters which side opens first — the phone
+re-offers whenever a receiver joins. Append `?audio=1` to the view URL in OBS
+(with *Control audio via OBS*) to carry the phone's microphone too. Each *Add phone* click mints an independent session, so several
+phones can join as separate sources. Signaling is a tiny in-process relay
+(`/phone-signal`); media flows phone → receiver directly over the LAN (STUN only —
+both devices must share the network).
+
+## Chaos engine (FX + OBS choreography)
+
+Drop `/overlay/fx` into OBS as a Browser Source and the **FX** buttons on the
+dashboard fire fullscreen effects — `confetti · glitch · matrix · flash · blackout`
+— pure overlay, harmless by construction.
+
+Presets go further: JSON files in `presets/chaos/` choreograph OBS itself —
+
+```json
+{ "name": "BRB slam", "cooldown": 10, "confirm": true,
+  "steps": [
+    { "do": "fx", "effect": "glitch", "ms": 450 },
+    { "do": "sleep", "ms": 300 },
+    { "do": "scene", "scene": "BRB" },
+    { "do": "parallel", "steps": [
+      { "do": "item", "scene": "BRB", "source": "Logo", "enabled": true },
+      { "do": "filter", "source": "Cam", "filter": "Blur", "enabled": true }
+    ]}
+  ] }
+```
+
+Step kinds: `scene` · `item` (show/hide) · `transform` · `filter` · `sleep` · `fx` ·
+`request` (raw obs-websocket escape hatch) · `serial`/`parallel` containers. Presets
+are validated at load with per-step labels (`brb-slam.json:steps[2]`) — bad files are
+skipped loudly, never silently. One preset runs at a time (409 if busy), each has its
+own cooldown (429), every run passes the safety guard (`chaos:<id>` — the kill switch
+freezes chaos too), and `"confirm": true` makes the dashboard ask before running.
 
 ## Overlay pack (captions · HUD · alerts · stinger)
 
@@ -621,6 +701,8 @@ video-stream/
 ├── install.sh          # one-shot setup + PATH launcher
 ├── install-pose.sh     # optional pose-estimation add-on
 ├── install-avatar.sh   # optional VTuber-avatar assets (three-vrm, mediapipe, model)
+├── install-phone.sh    # optional phone-as-camera HTTPS certificate
+├── presets/            # director rules example + chaos choreography presets
 ├── path_b.md           # avatar feature design doc
 ├── video_stream/
 │   ├── app.py          # FastAPI routes + CLI
@@ -631,7 +713,14 @@ video-stream/
 │   ├── hub.py          # Studio Bus: the /ws WebSocket event hub
 │   ├── safety.py       # kill switch + automation rate limiter
 │   ├── replay.py       # replay highlights + motion-spike auto-capture
-│   ├── obs.py          # minimal OBS WebSocket v5 client
+│   ├── overlays.py     # captions/alerts/HUD/stinger overlay pack + APIs
+│   ├── chat.py         # unified Twitch + Kick chat aggregator
+│   ├── settings.py     # runtime settings registry + token auth
+│   ├── setup_wizard.py # scan · propose scene map · verify checklist
+│   ├── peers.py        # Rig Link: remote motion signals for the director
+│   ├── phone.py        # phone-as-camera signaling + QR + pages
+│   ├── chaos.py        # JSON OBS choreography + fx effects engine
+│   ├── obs.py          # minimal OBS WebSocket v5 client + audio meters
 │   ├── network.py      # LAN IP detection
 │   ├── static/         # CSS / JS (+ vendored avatar libs, gitignored)
 │   └── templates/      # dashboard · OBS viewer · avatar

@@ -1,0 +1,12 @@
+{
+  "name": "Hype moment",
+  "cooldown": 8,
+  "steps": [
+    { "do": "parallel", "steps": [
+      { "do": "fx", "effect": "flash", "ms": 600 },
+      { "do": "fx", "effect": "confetti", "ms": 3500 }
+    ]},
+    { "do": "sleep", "ms": 2600 },
+    { "do": "fx", "effect": "glitch", "ms": 500 }
+  ]
+}

@@ -228,6 +228,30 @@ class OBSClient:
             )
         )
 
+    def set_scene_item_transform(self, scene: str, item_id: int, transform: dict) -> bool:
+        return self._ok(
+            self._request(
+                "SetSceneItemTransform",
+                {
+                    "sceneName": scene,
+                    "sceneItemId": item_id,
+                    "sceneItemTransform": transform,
+                },
+            )
+        )
+
+    def set_source_filter_enabled(self, source: str, filter_name: str, enabled: bool) -> bool:
+        return self._ok(
+            self._request(
+                "SetSourceFilterEnabled",
+                {
+                    "sourceName": source,
+                    "filterName": filter_name,
+                    "filterEnabled": enabled,
+                },
+            )
+        )
+
     def _drop(self) -> None:
         ws, self._ws = self._ws, None
         if ws is not None:

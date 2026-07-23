@@ -135,12 +135,42 @@
         <span id="overlay-chips"></span>
         <button type="button" class="btn btn-sm" id="btn-alert-test" title="Fire a test alert on the alerts overlay">Test alert</button>
       </div>
+      <div class="studio-group">
+        <span class="studio-label">Phone</span>
+        <button type="button" class="btn btn-sm" id="btn-phone" title="Turn a phone into a wireless camera — scan a QR, no install">📱 Add phone</button>
+      </div>
+      <div class="studio-group">
+        <span class="studio-label">FX</span>
+        <span id="fx-buttons"></span>
+        <select id="chaos-select" class="studio-input chaos-select" title="Chaos presets from presets/chaos/"></select>
+        <button type="button" class="btn btn-sm" id="btn-chaos-run">Run</button>
+      </div>
       <div class="studio-group" id="chat-group">
         <span class="studio-label">Chat</span>
         <input type="text" id="chat-twitch" class="studio-input" placeholder="twitch channel" />
         <input type="text" id="chat-kick" class="studio-input" placeholder="kick channel" />
         <button type="button" class="btn btn-sm" id="btn-chat-connect">Connect</button>
         <span class="muted mono" id="chat-status"></span>
+      </div>
+    </section>
+
+    <section class="panel phone-panel hidden" id="phone-panel">
+      <div class="phone-grid">
+        <img id="phone-qr" alt="Scan to turn your phone into a camera" width="222" height="222" />
+        <div class="phone-info">
+          <span class="eyebrow">Phone camera</span>
+          <h2 id="phone-title">Scan with your phone (same Wi-Fi)</h2>
+          <p class="muted" id="phone-hint">
+            Your phone will warn about the self-signed certificate once — tap
+            Advanced → Proceed. Then allow the camera, and add the view URL
+            below as an OBS Browser Source.
+          </p>
+          <div class="url-box">
+            <code id="phone-view-url" title="Click to copy"></code>
+            <button type="button" class="btn btn-copy" id="btn-phone-copy">Copy</button>
+          </div>
+          <span class="muted mono" id="phone-status"></span>
+        </div>
       </div>
     </section>
 

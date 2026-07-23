@@ -31,11 +31,14 @@ from video_stream.camera import CameraManager
 from video_stream.director import Director, DirectorConfig, load_rules_file
 from video_stream.hub import hub
 from video_stream.obs import AudioMeterListener, OBSClient
+from video_stream.peers import PeerManager, parse_peers
 from video_stream.network import get_local_ips, primary_ip
 from video_stream.replay import ReplayConfig, ReplayDirector, ReplayError
 from video_stream.safety import SafetyBlocked, SafetyManager
+from video_stream import chaos as chaos_mod
 from video_stream import chat as chat_mod
 from video_stream import overlays
+from video_stream import phone as phone_mod
 from video_stream import settings as settings_mod
 from video_stream import setup_wizard
 from video_stream.settings import settings
@@ -107,7 +110,20 @@ config: dict[str, Any] = {
     "safety_fallback_scene": "",
     "safety_max_actions": 40,
     "director_rules": "",
+    "peers": "",
+    "phone_https": False,
+    "phone_https_port": 8766,
 }
+
+# Rig Link export: monotonic time of the last peer poll with ?enable=1.
+# While a remote director is actively watching, motion scoring stays on even
+# if every local consumer (director, auto-replay) turns off.
+_last_signals_export = 0.0
+_SIGNALS_EXPORT_GRACE = 10.0
+
+
+def _signals_export_active() -> bool:
+    return time.monotonic() - _last_signals_export < _SIGNALS_EXPORT_GRACE
 
 
 @asynccontextmanager
@@ -192,6 +208,14 @@ def start_director() -> None:
                 port=config["obs_port"],
                 password=config["obs_password"],
             )
+        peers = None
+        peer_list = parse_peers(config["peers"]) if config["peers"] else []
+        if peer_list:
+            peers = PeerManager(peer_list)
+            print(
+                "  [director] rig link: "
+                + ", ".join(f"{n} → {u}" for n, u in peer_list)
+            )
         director = Director(
             manager,
             obs_client=obs,
@@ -207,6 +231,7 @@ def start_director() -> None:
             safety=safety,
             on_switch=_director_switched,
             audio=audio,
+            peers=peers,
         )
         director.start()
 
@@ -232,9 +257,9 @@ def stop_director() -> None:
             return
         director.stop()
         director = None
-        # Motion scoring is shared: replay auto-capture watches it too, so
-        # only shut it off when nobody else is listening.
-        if replay is None or not replay.auto_enabled:
+        # Motion scoring is shared: replay auto-capture and remote directors
+        # (Rig Link) watch it too — only shut it off when nobody is listening.
+        if (replay is None or not replay.auto_enabled) and not _signals_export_active():
             manager.set_motion_all(False)
 
 
@@ -271,6 +296,7 @@ _DIRECTOR_KEYS = frozenset(
         "director_hold",
         "director_cooldown",
         "director_min_score",
+        "peers",
     }
 )
 
@@ -336,10 +362,28 @@ setup_wizard.init(
     ),
 )
 overlays.init(templates=templates, asset_version=lambda: _asset_version())
+phone_mod.init(templates=templates, asset_version=lambda: _asset_version(), config=config)
+chaos_mod.init(
+    safety=safety,
+    # Repo presets first, user presets (~/.config/video-stream/chaos/) second —
+    # later wins on id collisions, and installs without the repo tree still
+    # get a preset dir that exists.
+    presets_dirs=[
+        ROOT.parent / "presets" / "chaos",
+        Path(os.environ.get("VIDEO_STREAM_CONFIG", Path.home() / ".config" / "video-stream"))
+        / "chaos",
+    ],
+    obs_factory=lambda: OBSClient(
+        host=config["obs_host"], port=config["obs_port"], password=config["obs_password"]
+    ),
+)
+chaos_mod.engine.reload()
 app.include_router(settings_mod.router)
 app.include_router(setup_wizard.router)
 app.include_router(overlays.router)
 app.include_router(chat_mod.router)
+app.include_router(phone_mod.router)
+app.include_router(chaos_mod.router)
 
 
 @app.exception_handler(SafetyBlocked)
@@ -611,10 +655,32 @@ async def api_replay_auto(body: Toggle):
     r = get_replay()
     if body.enabled:
         manager.set_motion_all(True)  # spikes need motion scores flowing
-    elif director is None:
+    elif director is None and not _signals_export_active():
         manager.set_motion_all(False)  # only the watcher was using them
     r.set_auto(body.enabled)
     return r.status()
+
+
+# ── Rig Link: export motion signals to a remote director ──────────────
+@app.get("/api/signals")
+async def api_signals(enable: bool = False):
+    """Motion scores + camera states for a peer instance's director.
+
+    ``?enable=1`` turns motion scoring on (and marks the export active so
+    local toggles don't shut it off underneath the remote director)."""
+    global _last_signals_export
+    if enable:
+        _last_signals_export = time.monotonic()
+        if not manager.motion_enabled:
+            manager.set_motion_all(True)
+    motion: dict[str, float] = {}
+    cameras = []
+    for cam in manager.list_cameras():
+        stream = manager.get(cam.index)
+        if stream is not None and stream.active:
+            motion[str(cam.index)] = round(float(stream.motion_score), 4)
+        cameras.append({"index": cam.index, "name": cam.name, "active": cam.active})
+    return {"motion": motion, "cameras": cameras, "ts": time.time()}
 
 
 # ── Smart Zoom: punch-ins baked into the stream ───────────────────────
@@ -865,6 +931,20 @@ def build_parser() -> argparse.ArgumentParser:
         "(see presets/director-rules.example.json)",
     )
     p.add_argument(
+        "--peers",
+        default="",
+        help="Rig Link: remote video-stream instances whose motion feeds this "
+        'director, e.g. "studio=192.168.1.42:8765,den=10.0.0.9:8765"',
+    )
+    p.add_argument(
+        "--phone-https-port",
+        type=int,
+        default=8766,
+        help="HTTPS port for phone-as-camera pages (needs certs: ./install-phone.sh)",
+    )
+    p.add_argument("--ssl-certfile", default="", help="TLS cert for the phone HTTPS port")
+    p.add_argument("--ssl-keyfile", default="", help="TLS key for the phone HTTPS port")
+    p.add_argument(
         "--director-auto-punch",
         action="store_true",
         help="After each director cut, punch in ~1.6x on the subject "
@@ -924,6 +1004,24 @@ def _open_dashboard(port: int, delay: float = 1.0) -> None:
             pass
 
     threading.Thread(target=_run, name="open-browser", daemon=True).start()
+
+
+def _https_cert_paths(args) -> tuple[Path, Path] | None:
+    """Certs for the phone HTTPS port: explicit flags, else the config dir
+    (where ./install-phone.sh puts them). None = phone pages stay http-only."""
+    if bool(args.ssl_certfile) != bool(args.ssl_keyfile):
+        print("  [phone] --ssl-certfile and --ssl-keyfile must BOTH be given — ignoring")
+    if args.ssl_certfile and args.ssl_keyfile:
+        cert, key = Path(args.ssl_certfile), Path(args.ssl_keyfile)
+    else:
+        base = (
+            Path(os.environ.get("VIDEO_STREAM_CONFIG", Path.home() / ".config" / "video-stream"))
+            / "certs"
+        )
+        cert, key = base / "cert.pem", base / "key.pem"
+    if cert.exists() and key.exists():
+        return cert, key
+    return None
 
 
 def _parse_scene_map(raw: str) -> dict[int, str]:
@@ -1009,6 +1107,7 @@ def main(argv: list[str] | None = None) -> None:
             "safety_fallback_scene": args.safety_fallback_scene,
             "safety_max_actions": args.safety_max_actions,
             "director_rules": args.director_rules,
+            "peers": args.peers,
         }
     )
 
@@ -1033,6 +1132,12 @@ def main(argv: list[str] | None = None) -> None:
     if args.director:
         _preflight_director()
 
+    https = None if args.reload else _https_cert_paths(args)
+    if args.reload and _https_cert_paths(args) is not None:
+        print("  [phone] --reload runs a single plain-http server — phone HTTPS is off in dev mode")
+    config["phone_https"] = https is not None
+    config["phone_https_port"] = args.phone_https_port
+
     lan = primary_ip()
     print()
     print("  ┌─────────────────────────────────────────────┐")
@@ -1042,6 +1147,10 @@ def main(argv: list[str] | None = None) -> None:
     print(f"  Network    http://{lan}:{args.port}")
     print(f"  Streams    http://{lan}:{args.port}/stream/{{id}}")
     print(f"  OBS view   http://{lan}:{args.port}/view/{{id}}")
+    if https is not None:
+        print(f"  Phone      https://{lan}:{args.phone_https_port}/phone  (QR on the dashboard)")
+    else:
+        print("  Phone      off — run ./install-phone.sh once to enable phone cameras")
     if args.open_browser:
         print("  Opening dashboard in your browser…")
     print()
@@ -1049,13 +1158,40 @@ def main(argv: list[str] | None = None) -> None:
     if args.open_browser:
         _open_dashboard(args.port)
 
-    uvicorn.run(
-        "video_stream.app:app",
-        host=args.host,
-        port=args.port,
-        reload=args.reload,
-        log_level="info",
-    )
+    if https is None:
+        uvicorn.run(
+            "video_stream.app:app",
+            host=args.host,
+            port=args.port,
+            reload=args.reload,
+            log_level="info",
+        )
+        return
+
+    # Phone pages need HTTPS (secure-context getUserMedia); everything else
+    # stays http. BOTH servers share this process so the phone (https) and the
+    # receiver (http) meet in the same in-memory signaling room. The second
+    # server runs with lifespan off — startup/teardown must fire exactly once.
+    cert, key = https
+
+    async def _serve_both() -> None:
+        http_server = uvicorn.Server(
+            uvicorn.Config(app, host=args.host, port=args.port, log_level="info")
+        )
+        https_server = uvicorn.Server(
+            uvicorn.Config(
+                app,
+                host=args.host,
+                port=args.phone_https_port,
+                ssl_certfile=str(cert),
+                ssl_keyfile=str(key),
+                log_level="warning",
+                lifespan="off",
+            )
+        )
+        await asyncio.gather(http_server.serve(), https_server.serve())
+
+    asyncio.run(_serve_both())
 
 
 if __name__ == "__main__":

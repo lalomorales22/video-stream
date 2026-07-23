@@ -50,6 +50,7 @@ FIELDS: dict[str, Field] = {
     "director_cooldown": Field(float, 3.0, help="Minimum seconds between cuts"),
     "director_min_score": Field(float, 0.02, help="Motion score needed to be a candidate"),
     "director_auto_punch": Field(bool, False, help="Punch in on the subject after each cut"),
+    "peers": Field(str, "", help='Rig Link peers, e.g. "studio=192.168.1.42:8765"'),
     "safety_fallback_scene": Field(str, "", help="OBS scene for the panic cut"),
     "safety_max_actions": Field(int, 40, help="Max automated OBS actions per minute"),
     "replay_media_source": Field(str, "", help="OBS media source for instant replay playback"),

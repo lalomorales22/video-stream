@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no" />
+  <title>video-stream · phone camera</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { height: 100%; background: #070708; color: #ececf1; font-family: -apple-system, "Segoe UI", sans-serif; overflow: hidden; }
+    #preview { position: fixed; inset: 0; width: 100%; height: 100%; object-fit: cover; background: #000; }
+    #hud {
+      position: fixed;
+      left: 0; right: 0; bottom: 0;
+      padding: 18px 16px calc(18px + env(safe-area-inset-bottom));
+      background: linear-gradient(0deg, rgba(0, 0, 0, 0.75), transparent);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+    #status { font-size: 15px; font-weight: 600; text-shadow: 0 1px 4px rgba(0,0,0,.8); }
+    #status.live { color: #3dd68c; }
+    #detail { font-size: 12px; color: rgba(255,255,255,.75); margin-top: 3px; }
+    .btn {
+      border: 1px solid rgba(255,255,255,.25);
+      background: rgba(0,0,0,.45);
+      color: #fff;
+      border-radius: 999px;
+      padding: 12px 18px;
+      font-size: 14px;
+      font-weight: 600;
+      backdrop-filter: blur(8px);
+      -webkit-backdrop-filter: blur(8px);
+    }
+    .hidden { display: none !important; }
+    #card {
+      position: fixed;
+      inset: 0;
+      display: grid;
+      place-items: center;
+      padding: 24px;
+      background: #070708;
+      text-align: center;
+    }
+    #card h1 { font-size: 22px; font-weight: 800; margin-bottom: 10px; }
+    #card p { color: rgba(255,255,255,.7); font-size: 15px; line-height: 1.5; max-width: 34ch; margin: 0 auto 18px; }
+    .dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; background: #ff3d6e; margin-right: 6px; animation: pulse 1.4s ease infinite; }
+    @keyframes pulse { 50% { opacity: .5; } }
+  </style>
+</head>
+<body>
+  <video id="preview" autoplay playsinline muted></video>
+
+  <div id="card">
+    <div>
+      <h1 id="card-title">Starting camera…</h1>
+      <p id="card-text">Allow camera and microphone access when prompted.</p>
+      <button type="button" class="btn hidden" id="btn-retry">Try again</button>
+    </div>
+  </div>
+
+  <div id="hud" class="hidden">
+    <div>
+      <div id="status"><span class="dot"></span><span id="status-text">Connecting…</span></div>
+      <div id="detail">Keep this page open and the screen awake while streaming.</div>
+    </div>
+    <button type="button" class="btn" id="btn-flip">↺ Flip</button>
+  </div>
+
+  <script>
+    const session = new URLSearchParams(location.search).get("session") || "";
+    const preview = document.getElementById("preview");
+    const card = document.getElementById("card");
+    const cardTitle = document.getElementById("card-title");
+    const cardText = document.getElementById("card-text");
+    const btnRetry = document.getElementById("btn-retry");
+    const hud = document.getElementById("hud");
+    const statusEl = document.getElementById("status");
+    const statusText = document.getElementById("status-text");
+
+    let facing = "environment";
+    let stream = null;
+    let pc = null;
+    let ws = null;
+    let live = false;
+    let closing = false;
+    let wsDelay = 500;
+
+    function showCard(title, text, retry) {
+      card.classList.remove("hidden");
+      hud.classList.add("hidden");
+      cardTitle.textContent = title;
+      cardText.textContent = text;
+      btnRetry.classList.toggle("hidden", !retry);
+    }
+
+    function showLive(state, text) {
+      card.classList.add("hidden");
+      hud.classList.remove("hidden");
+      statusEl.classList.toggle("live", state === "live");
+      statusText.textContent = text;
+    }
+
+    function teardown() {
+      closing = true;
+      try { ws?.close(); } catch {}
+      try { pc?.close(); } catch {}
+      stream?.getTracks().forEach((t) => t.stop());
+      ws = null; pc = null; stream = null; live = false;
+    }
+
+    // One offer attempt = one closure-scoped RTCPeerConnection, so a flip or
+    // re-offer mid-handshake can never apply stale SDP to the wrong peer.
+    async function makeOffer() {
+      if (!stream || !ws || ws.readyState !== WebSocket.OPEN) return;
+      try { pc?.close(); } catch {}
+      const thisPc = new RTCPeerConnection({ iceServers: [{ urls: "stun:stun.l.google.com:19302" }] });
+      pc = thisPc;
+      const iceQueue = [];
+      let remoteSet = false;
+      thisPc._applyAnswer = async (sdp) => {
+        if (thisPc !== pc) return;
+        await thisPc.setRemoteDescription(sdp);
+        remoteSet = true;
+        while (iceQueue.length) {
+          await thisPc.addIceCandidate(iceQueue.shift()).catch(() => {});
+        }
+      };
+      thisPc._queueIce = (candidate) => {
+        if (remoteSet) thisPc.addIceCandidate(candidate).catch(() => {});
+        else iceQueue.push(candidate);
+      };
+      stream.getTracks().forEach((track) => thisPc.addTrack(track, stream));
+      thisPc.onicecandidate = (e) => {
+        if (e.candidate && thisPc === pc) ws?.send(JSON.stringify({ type: "ice", candidate: e.candidate }));
+      };
+      thisPc.onconnectionstatechange = () => {
+        if (thisPc !== pc) return; // superseded
+        if (thisPc.connectionState === "connected") {
+          live = true;
+          showLive("live", "LIVE — streaming to your rig");
+          navigator.wakeLock?.request("screen").catch(() => {});
+        } else if (thisPc.connectionState === "failed") {
+          live = false;
+          showCard("Connection failed", "Are both devices on the same Wi-Fi?", true);
+        } else if (thisPc.connectionState === "disconnected") {
+          live = false;
+          showLive("connecting", "Reconnecting…");
+        }
+      };
+      const offer = await thisPc.createOffer();
+      await thisPc.setLocalDescription(offer);
+      if (thisPc === pc) ws?.send(JSON.stringify({ type: "offer", sdp: thisPc.localDescription }));
+    }
+
+    // The signaling socket lives for the whole session and re-offers whenever
+    // a receiver announces itself — so it no longer matters whether the phone
+    // or the OBS view page opens first.
+    function connectSignaling() {
+      const proto = location.protocol === "https:" ? "wss" : "ws";
+      ws = new WebSocket(`${proto}://${location.host}/phone-signal?session=${session}&role=phone`);
+      ws.onopen = () => {
+        wsDelay = 500;
+        makeOffer();
+      };
+      ws.onmessage = async (event) => {
+        try {
+          const msg = JSON.parse(String(event.data));
+          if (msg.type === "answer") await pc?._applyAnswer(msg.sdp);
+          else if (msg.type === "ice") pc?._queueIce(msg.candidate);
+          else if (msg.type === "ready") makeOffer(); // a receiver (re)joined
+        } catch {}
+      };
+      ws.onclose = () => {
+        if (closing) return;
+        setTimeout(connectSignaling, wsDelay);
+        wsDelay = Math.min(5000, wsDelay + 500);
+      };
+      ws.onerror = () => {
+        // The WS only matters for signaling — never kill a live stream over it.
+        if (!live) showLive("connecting", "Reaching the rig…");
+        try { ws.close(); } catch {}
+      };
+    }
+
+    async function start() {
+      teardown();
+      closing = false;
+      if (!session) {
+        showCard("Missing session", "Scan the QR code from the dashboard again.", false);
+        return;
+      }
+      if (!navigator.mediaDevices?.getUserMedia) {
+        // On http:// pages phones don't even expose mediaDevices.
+        showCard(
+          "Secure connection required",
+          "Open this page over HTTPS — scan the QR from the dashboard (and accept the certificate warning once).",
+          false
+        );
+        return;
+      }
+      showCard("Starting camera…", "Allow camera and microphone access when prompted.", false);
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: facing, width: { ideal: 1920 }, height: { ideal: 1080 } },
+          audio: true,
+        });
+      } catch (e) {
+        const denied = /NotAllowed/i.test(e.name || "");
+        showCard(
+          "Camera unavailable",
+          denied ? "Camera permission was denied — allow it and try again." : `Camera unavailable: ${e.message || e.name}`,
+          true
+        );
+        return;
+      }
+      preview.srcObject = stream;
+      showLive("connecting", "Connecting to your rig…");
+      connectSignaling();
+    }
+
+    document.getElementById("btn-flip").addEventListener("click", () => {
+      facing = facing === "environment" ? "user" : "environment";
+      start(); // full teardown + fresh offer; the receiver re-answers
+    });
+    btnRetry.addEventListener("click", () => start());
+    document.addEventListener("visibilitychange", () => {
+      if (!document.hidden && live) navigator.wakeLock?.request("screen").catch(() => {});
+    });
+
+    start();
+  </script>
+</body>
+</html>

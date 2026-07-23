@@ -120,7 +120,7 @@ def set_subtitle_text(text: Any, final: bool = True) -> dict[str, Any]:
 
 
 # ---- overlay pages --------------------------------------------------------
-_OVERLAYS = ("subtitles", "alerts", "hud", "stinger", "chat")
+_OVERLAYS = ("subtitles", "alerts", "hud", "stinger", "chat", "fx")
 
 router = APIRouter()
 

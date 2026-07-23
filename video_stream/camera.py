@@ -399,8 +399,9 @@ class CameraStream:
             # director and auto-replay judge the real room, not the crop), the
             # punch-in zoom is applied next, and pose runs last so the skeleton
             # is detected and drawn in the same zoomed space the viewer sees.
-            if self._motion is not None:
-                self.motion_score = self._motion.update(frame)
+            motion = self._motion  # local ref: set_motion(False) races this read
+            if motion is not None:
+                self.motion_score = motion.update(frame)
 
             frame = self.zoom.apply(frame)
             self._encode_frame(self._apply_pose(frame))

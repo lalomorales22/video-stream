@@ -184,6 +184,32 @@ async def api_setup_verify(request: Request):
             else "Off — enable in OBS: Settings → Output → Replay Buffer",
         )
 
+    from video_stream.peers import parse_peers
+
+    peer_list = parse_peers(_ctx["config"].get("peers") or "")
+    if peer_list:
+
+        def _check_peers() -> list[tuple[str, bool, str]]:
+            import httpx
+
+            results = []
+            with httpx.Client(timeout=2.0) as client:
+                for name, url in peer_list:
+                    try:
+                        resp = client.get(f"{url}/api/signals")
+                        if resp.status_code == 200:
+                            cams = resp.json().get("cameras") or []
+                            live = sum(1 for c in cams if c.get("active"))
+                            results.append((name, True, f"{url} — {live} live cameras"))
+                        else:
+                            results.append((name, False, f"{url} — HTTP {resp.status_code}"))
+                    except Exception as exc:
+                        results.append((name, False, f"{url} — {exc}"))
+            return results
+
+        for name, ok, detail in await asyncio.to_thread(_check_peers):
+            check(f"Rig Link peer '{name}'", ok, detail)
+
     # find_spec answers "installed?" without executing mediapipe's heavy
     # native import (~1s), which would block the event loop mid-show.
     if importlib.util.find_spec("mediapipe") is not None:

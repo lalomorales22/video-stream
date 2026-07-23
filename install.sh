@@ -129,14 +129,42 @@ case ":${PATH}:" in
     ;;
 esac
 
+# ── Smoke check ────────────────────────────────────────
+# Import every module once so a broken install fails HERE, loudly,
+# instead of at showtime.
+if "${PYTHON_BIN}" - <<'PY' 2>/dev/null
+import video_stream.app  # pulls in camera/director/hub/safety/replay/overlays/chat/settings/wizard/peers/phone/chaos
+PY
+then
+  ok "all studio modules import cleanly"
+else
+  warn "module import failed — try removing .venv and re-running ./install.sh"
+fi
+
 echo
 bold "Done."
 echo
 echo "  Start anytime with:"
 echo "    video-stream"
 echo
-echo "  That will start the server and open the dashboard."
-echo "  Extra flags work too:  video-stream --port 9000 --no-open"
+echo "  That starts the server and opens the dashboard — cameras with"
+echo "  copyable OBS URLs, the auto-director, replay highlights, Smart"
+echo "  Zoom, live captions, overlays, unified chat, chaos FX, and the"
+echo "  Setup wizard (scan → propose a scene map → verify the rig)."
+echo
+echo "  Extra flags:  video-stream --port 9000 --no-open"
+echo "                video-stream --director --director-rules rules.json"
+echo "                video-stream --director --peers \"studio=<ip>:8765\"   (Rig Link)"
+echo
+echo "  Optional add-ons (each is a one-time install):"
+echo "    ./install-pose.sh     pose skeleton + face-aware auto punch-ins"
+echo "    ./install-avatar.sh   VTuber avatar studio (three-vrm + tracking)"
+echo "    ./install-phone.sh    phone-as-camera (generates the HTTPS cert"
+echo "                          phones need, then scan a QR to go live)"
+echo
+echo "  OBS browser-source overlays (copy URLs from the dashboard):"
+echo "    /overlay/subtitles  /overlay/hud  /overlay/alerts"
+echo "    /overlay/stinger    /overlay/chat  /overlay/fx"
 echo
 echo "  Re-run this installer anytime to refresh the install."
 echo

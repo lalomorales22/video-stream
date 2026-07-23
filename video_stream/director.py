@@ -153,10 +153,12 @@ class DirectorConfig:
 
 class Director:
     def __init__(self, manager, obs_client=None, config: DirectorConfig | None = None,
-                 clock=time.monotonic, safety=None, on_switch=None, audio=None) -> None:
+                 clock=time.monotonic, safety=None, on_switch=None, audio=None,
+                 peers=None) -> None:
         self.manager = manager
         self.obs = obs_client
         self.audio = audio  # AudioMeterListener | None
+        self.peers = peers  # PeerManager | None — remote motion signals
         self.cfg = config or DirectorConfig()
         self._clock = clock
         self.safety = safety
@@ -184,7 +186,13 @@ class Director:
             kind, _, cam = key.partition(":")
             if kind != "motion":
                 continue
-            idx = int(cam)
+            try:
+                idx = int(cam)
+            except ValueError:
+                # Rig Link peer signals ("motion:<peer>:<idx>") have no
+                # scene-map slot; they are only addressable through an
+                # explicit rules file.
+                continue
             rules.append(
                 Rule(
                     source=key,
@@ -274,6 +282,8 @@ class Director:
         if self.audio is not None:
             for norm, (_name, db, seen_at) in self.audio.levels().items():
                 signals[f"audio:{norm}"] = (round(db, 1), seen_at)
+        if self.peers is not None:
+            signals.update(self.peers.signals())  # motion:<peer>:<idx>
         return signals
 
     # ---- actuation --------------------------------------------------------
@@ -323,7 +333,14 @@ class Director:
                     self.last_decision = f"blocked:{reason}"
                     time.sleep(self.cfg.interval)
                     continue
-            switch = self.update(self._clock(), self._collect_signals())
+            try:
+                switch = self.update(self._clock(), self._collect_signals())
+            except Exception as exc:
+                # A signal-shape surprise must never kill the show (same house
+                # rule as _actuate's listener guard).
+                self.last_decision = f"error:{exc}"
+                print(f"[director] update failed (loop continues): {exc}")
+                switch = None
             if switch is not None:
                 self._actuate(*switch)
             time.sleep(self.cfg.interval)
@@ -337,6 +354,8 @@ class Director:
                 self.current_scene = self.obs.current_scene()
         if self.audio is not None:
             self.audio.start()
+        if self.peers is not None:
+            self.peers.start()
         self._running = True
         self._thread = threading.Thread(target=self._loop, name="director", daemon=True)
         self._thread.start()
@@ -353,6 +372,8 @@ class Director:
         self._thread = None
         if self.audio is not None:
             self.audio.stop()
+        if self.peers is not None:
+            self.peers.stop()
 
     def status(self) -> dict:
         motion = {
@@ -382,5 +403,6 @@ class Director:
             "dry_run": self.cfg.dry_run,
             "obs_connected": self.obs_connected,
             "audio_connected": bool(self.audio and self.audio.connected),
+            "peers": self.peers.status() if self.peers is not None else [],
             "recent": self.log[-10:],
         }

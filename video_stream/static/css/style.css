@@ -779,6 +779,78 @@ input {
 .overlay-chip:hover {
   border-color: rgba(79, 209, 197, 0.55);
 }
+.chaos-select {
+  width: auto;
+  max-width: 190px;
+  appearance: none;
+}
+#fx-buttons {
+  display: inline-flex;
+  gap: 0.3rem;
+  flex-wrap: wrap;
+}
+#fx-buttons .btn {
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  padding: 0.3rem 0.55rem;
+}
+
+/* ── Phone-as-camera panel ───────────────────────────── */
+
+.phone-panel {
+  padding: 1.25rem 1.4rem;
+  margin-bottom: 1rem;
+}
+.phone-panel.hidden {
+  display: none;
+}
+.phone-grid {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 1.4rem;
+  align-items: center;
+}
+#phone-qr {
+  border-radius: var(--radius-sm);
+  background: #fff;
+  padding: 8px;
+  width: 222px;
+  height: 222px;
+}
+#phone-qr.hidden {
+  display: none;
+}
+.phone-info {
+  display: grid;
+  gap: 0.6rem;
+  justify-items: start;
+}
+.phone-info h2 {
+  margin: 0;
+  font-size: 1.15rem;
+  letter-spacing: -0.03em;
+  font-weight: 700;
+}
+.phone-info p {
+  margin: 0;
+  font-size: 0.88rem;
+  line-height: 1.5;
+  max-width: 52ch;
+}
+.phone-info .url-box {
+  width: 100%;
+  max-width: 480px;
+}
+@media (max-width: 760px) {
+  .phone-grid {
+    grid-template-columns: 1fr;
+    justify-items: center;
+    text-align: center;
+  }
+  .phone-info {
+    justify-items: center;
+  }
+}
 
 /* ── Camera grid ─────────────────────────────────────── */
 

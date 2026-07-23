@@ -671,7 +671,7 @@
       (state.bases || [])[0]?.base ||
       "";
     overlayChips.innerHTML = "";
-    ["subtitles", "alerts", "hud", "stinger", "chat"].forEach((name) => {
+    ["subtitles", "alerts", "hud", "stinger", "chat", "fx"].forEach((name) => {
       const chip = document.createElement("span");
       chip.className = "overlay-chip";
       chip.textContent = name;
@@ -693,6 +693,137 @@
       body: JSON.stringify({ type, amount: type === "bits" ? 500 : type === "donation" ? "$5.00" : null }),
     }).catch(() => null);
     toast(res && res.ok ? `Test ${type} alert sent` : "Alert failed", !!(res && res.ok));
+  });
+
+  // ── FX + chaos presets: overlay effects and OBS choreography ─────────
+  const fxButtons = document.getElementById("fx-buttons");
+  const chaosSelect = document.getElementById("chaos-select");
+  let chaosPresets = [];
+
+  async function loadChaos() {
+    try {
+      const res = await fetch("/api/chaos");
+      if (!res.ok) return;
+      const d = await res.json();
+      chaosPresets = d.presets || [];
+      if (fxButtons && !fxButtons.childElementCount) {
+        (d.effects || []).forEach((effect) => {
+          const b = document.createElement("button");
+          b.type = "button";
+          b.className = "btn btn-sm";
+          b.textContent = effect;
+          b.title = `Play the ${effect} effect on the FX overlay`;
+          b.addEventListener("click", async () => {
+            const r = await fetch("/api/chaos/fx", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ effect }),
+            }).catch(() => null);
+            toast(r && r.ok ? `${effect}!` : "FX failed — is the fx overlay open?", !!(r && r.ok));
+          });
+          fxButtons.appendChild(b);
+        });
+      }
+      if (chaosSelect) {
+        chaosSelect.innerHTML = "";
+        chaosPresets.forEach((p) => {
+          const opt = document.createElement("option");
+          opt.value = p.id;
+          opt.textContent = p.name;
+          chaosSelect.appendChild(opt);
+        });
+        chaosSelect.parentElement
+          ?.querySelectorAll(".chaos-select, #btn-chaos-run")
+          .forEach((el) => el.classList.toggle("hidden", chaosPresets.length === 0));
+      }
+      (d.load_errors || []).forEach((e) => console.warn("[chaos]", e));
+    } catch {}
+  }
+
+  document.getElementById("btn-chaos-run")?.addEventListener("click", async () => {
+    const id = chaosSelect?.value;
+    if (!id) return;
+    const preset = chaosPresets.find((p) => p.id === id);
+    if (preset?.confirm && !window.confirm(`Run '${preset.name}'? It drives OBS directly.`)) return;
+    try {
+      const res = await fetch("/api/chaos/trigger", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id }),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(body.detail || "Chaos failed");
+      toast(`Running '${preset?.name || id}' (${body.steps} steps)`);
+    } catch (err) {
+      toast(err.message || "Chaos failed", false);
+    }
+  });
+
+  loadChaos();
+
+  // ── Phone-as-camera: mint a session, show the QR, watch for the phone ─
+  const phonePanel = document.getElementById("phone-panel");
+  const phoneQr = document.getElementById("phone-qr");
+  const phoneTitle = document.getElementById("phone-title");
+  const phoneHint = document.getElementById("phone-hint");
+  const phoneViewUrl = document.getElementById("phone-view-url");
+  const phoneStatus = document.getElementById("phone-status");
+  let phoneSession = null;
+  let phoneData = null;
+  let phonePollTimer = null;
+
+  document.getElementById("btn-phone")?.addEventListener("click", async () => {
+    if (!phonePanel.classList.contains("hidden")) {
+      phonePanel.classList.add("hidden");
+      clearInterval(phonePollTimer);
+      return;
+    }
+    try {
+      // Reuse the session across open/close — re-minting would orphan a
+      // phone that's mid-scan on the previous QR.
+      if (!phoneData) {
+        const res = await fetch("/api/phone/session");
+        if (!res.ok) throw new Error("Could not create a phone session");
+        phoneData = await res.json();
+      }
+      const d = phoneData;
+      phoneSession = d.session;
+      phonePanel.classList.remove("hidden");
+      if (!d.https) {
+        phoneQr.classList.add("hidden");
+        phoneTitle.textContent = "One-time setup needed";
+        phoneHint.textContent =
+          "Phones only allow camera access on secure pages. In the project folder run ./install-phone.sh once, restart video-stream, and this panel becomes a QR code.";
+        phoneViewUrl.textContent = "";
+        phoneStatus.textContent = "";
+        return;
+      }
+      phoneQr.classList.remove("hidden");
+      phoneQr.src = d.qr_url;
+      phoneTitle.textContent = "Scan with your phone (same Wi-Fi)";
+      phoneViewUrl.textContent = d.view_url;
+      phoneViewUrl.onclick = async () => {
+        const ok = await copyText(d.view_url);
+        toast(ok ? "View URL copied — paste into OBS as a Browser Source" : "Could not copy", ok);
+      };
+      document.getElementById("btn-phone-copy").onclick = phoneViewUrl.onclick;
+      phoneStatus.textContent = "waiting for the phone…";
+      clearInterval(phonePollTimer);
+      phonePollTimer = setInterval(async () => {
+        try {
+          const s = await fetch("/api/phone/status").then((r) => r.json());
+          const members = (s.sessions || {})[phoneSession] || 0;
+          phoneStatus.textContent =
+            members >= 2
+              ? "✓ phone connected — the view URL is live"
+              : members === 1
+              ? "receiver open — waiting for the phone…"
+              : "waiting for the phone…";
+        } catch {}
+      }, 2500);
+    } catch (err) {
+      toast(err.message || "Phone setup failed", false);
+    }
   });
 
   // ── Unified chat: connect Twitch/Kick, show live status ─────────────
@@ -975,6 +1106,7 @@
     // Re-sync once on (re)connect; retained events fill in the rest.
     refresh();
     refreshDirector();
+    loadChaos(); // retries a failed first load; guarded against duplicates
   });
 
   refresh();

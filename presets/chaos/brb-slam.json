@@ -1,0 +1,12 @@
+{
+  "name": "BRB slam (edit the scene names to match your OBS!)",
+  "cooldown": 10,
+  "confirm": true,
+  "steps": [
+    { "do": "fx", "effect": "glitch", "ms": 450 },
+    { "do": "sleep", "ms": 300 },
+    { "do": "scene", "scene": "BRB" },
+    { "do": "sleep", "ms": 150 },
+    { "do": "fx", "effect": "blackout", "ms": 400 }
+  ]
+}

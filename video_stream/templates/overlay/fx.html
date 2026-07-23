@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>video-stream · fx overlay</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { width: 100vw; height: 100vh; background: transparent; overflow: hidden; }
+    canvas { position: fixed; inset: 0; }
+    #flash { position: fixed; inset: 0; background: #fff; opacity: 0; pointer-events: none; }
+    #blackout { position: fixed; inset: 0; background: #000; opacity: 0; pointer-events: none; transition: opacity 0.25s ease; }
+    .slice { position: fixed; left: 0; width: 100vw; height: 34vh; opacity: 0; pointer-events: none; mix-blend-mode: screen; }
+    #g-a { top: 0; background: rgba(255, 61, 110, 0.35); }
+    #g-b { top: 33vh; background: rgba(79, 209, 197, 0.35); }
+    #g-c { top: 66vh; background: rgba(255, 255, 255, 0.18); }
+  </style>
+</head>
+<body>
+  <canvas id="fx-canvas"></canvas>
+  <div id="flash"></div>
+  <div id="blackout"></div>
+  <div class="slice" id="g-a"></div>
+  <div class="slice" id="g-b"></div>
+  <div class="slice" id="g-c"></div>
+
+  <script src="/static/js/bus.js?v={{ asset_v }}"></script>
+  <script>
+    const canvas = document.getElementById("fx-canvas");
+    const ctx = canvas.getContext("2d");
+    const flashEl = document.getElementById("flash");
+    const blackoutEl = document.getElementById("blackout");
+    const slices = ["g-a", "g-b", "g-c"].map((id) => document.getElementById(id));
+
+    function fit() {
+      canvas.width = innerWidth;
+      canvas.height = innerHeight;
+    }
+    fit();
+    addEventListener("resize", fit);
+
+    const COLORS = ["#ff3d6e", "#4fd1c5", "#ffcc00", "#e2e8f0", "#00e676"];
+    let particles = [];
+    let matrixCols = [];
+    let mode = null;
+    let endAt = 0;
+    let rafId = 0;
+
+    function jitter(t, salt) {
+      const v = Math.sin(t * 137.31 + salt * 91.7) * 43758.5453;
+      return v - Math.floor(v) - 0.5;
+    }
+
+    function startConfetti(ms) {
+      particles = Array.from({ length: 180 }, () => ({
+        x: Math.random() * canvas.width,
+        y: -20 - Math.random() * canvas.height * 0.5,
+        vx: (Math.random() - 0.5) * 3,
+        vy: 2.5 + Math.random() * 4,
+        size: 6 + Math.random() * 8,
+        rot: Math.random() * Math.PI,
+        vr: (Math.random() - 0.5) * 0.25,
+        color: COLORS[(Math.random() * COLORS.length) | 0],
+      }));
+      run("confetti", ms);
+    }
+
+    function startMatrix(ms) {
+      const colWidth = 18;
+      matrixCols = Array.from({ length: Math.ceil(canvas.width / colWidth) }, (_, i) => ({
+        x: i * colWidth,
+        y: -Math.random() * canvas.height,
+        speed: 4 + Math.random() * 8,
+      }));
+      run("matrix", ms);
+    }
+
+    function clearVisuals() {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      slices.forEach((s) => {
+        s.style.opacity = "0";
+        s.style.transform = "";
+      });
+    }
+
+    function run(which, ms) {
+      clearVisuals(); // switching effects must never freeze the old one on-air
+      mode = which;
+      endAt = performance.now() + ms;
+      cancelAnimationFrame(rafId);
+      rafId = requestAnimationFrame(frame);
+    }
+
+    function frame(now) {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      const fading = Math.min(1, Math.max(0, (endAt - now) / 400));
+      if (mode === "confetti") {
+        ctx.globalAlpha = fading;
+        particles.forEach((p) => {
+          p.x += p.vx;
+          p.y += p.vy;
+          p.rot += p.vr;
+          if (p.y > canvas.height + 30) p.y = -20;
+          ctx.save();
+          ctx.translate(p.x, p.y);
+          ctx.rotate(p.rot);
+          ctx.fillStyle = p.color;
+          ctx.fillRect(-p.size / 2, -p.size / 4, p.size, p.size / 2);
+          ctx.restore();
+        });
+        ctx.globalAlpha = 1;
+      } else if (mode === "matrix") {
+        ctx.globalAlpha = fading;
+        ctx.font = "16px monospace";
+        matrixCols.forEach((col) => {
+          col.y += col.speed;
+          if (col.y > canvas.height + 200) col.y = -200;
+          for (let i = 0; i < 12; i++) {
+            const y = col.y - i * 18;
+            if (y < -20 || y > canvas.height + 20) continue;
+            ctx.fillStyle = i === 0 ? "#d8ffe0" : `rgba(0, 230, 118, ${1 - i / 12})`;
+            ctx.fillText(String.fromCharCode(0x30a0 + ((Math.random() * 96) | 0)), col.x, y);
+          }
+        });
+        ctx.globalAlpha = 1;
+      } else if (mode === "glitch") {
+        const step = Math.floor((now / 1000) * 30);
+        slices.forEach((s, i) => {
+          s.style.opacity = String(fading);
+          s.style.transform = `translate(${jitter(step, i + 1) * 60}px, ${jitter(step, i + 5) * 12}px) scaleX(${1 + jitter(step, i + 9) * 0.06})`;
+        });
+      }
+      if (now < endAt) {
+        rafId = requestAnimationFrame(frame);
+      } else {
+        stopAll();
+      }
+    }
+
+    function stopAll() {
+      mode = null;
+      clearVisuals();
+    }
+
+    function playFlash(ms) {
+      flashEl.animate(
+        [{ opacity: 0 }, { opacity: 0.95, offset: 0.08 }, { opacity: 0 }],
+        { duration: Math.min(ms, 900), easing: "ease-out" }
+      );
+    }
+
+    let blackoutTimer = null;
+    function playBlackout(ms) {
+      blackoutEl.style.opacity = "1";
+      clearTimeout(blackoutTimer); // an older, shorter blackout must not end this one
+      blackoutTimer = setTimeout(() => (blackoutEl.style.opacity = "0"), ms);
+    }
+
+    Bus.on("fx", (payload) => {
+      if (!payload || typeof payload !== "object") return;
+      const ms = Math.max(200, Math.min(20000, payload.ms || 1500));
+      switch (payload.effect) {
+        case "confetti": startConfetti(ms); break;
+        case "matrix": startMatrix(ms); break;
+        case "glitch": run("glitch", Math.min(ms, 2000)); break;
+        case "flash": playFlash(ms); break;
+        case "blackout": playBlackout(ms); break;
+      }
+    });
+  </script>
+</body>
+</html>
