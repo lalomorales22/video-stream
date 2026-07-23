@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import mimetypes
 import os
 import threading
@@ -71,10 +72,19 @@ async def lifespan(_app: FastAPI):
     manager.pose_variant = config["pose_model"]
     manager.pose_stride = config["pose_stride"]
     manager.motion_enabled = config["director"]  # scoring only when directing
-    manager.discover(auto_start=True)
 
-    if config["director"]:
-        start_director()
+    # Open cameras (and start the director) in the background so the server
+    # serves the dashboard/avatar immediately instead of blocking for ~15s
+    # while every camera warms up.
+    def _startup() -> None:
+        try:
+            manager.discover(auto_start=True)
+            if config["director"]:
+                start_director()
+        except Exception as exc:  # never let startup kill the server
+            print(f"[startup] {exc}")
+
+    threading.Thread(target=_startup, name="startup", daemon=True).start()
 
     yield
 
@@ -295,7 +305,9 @@ async def api_toggle_pose(index: int, body: Toggle, request: Request):
     if stream is None:
         raise HTTPException(status_code=404, detail="Camera not found")
     try:
-        stream.set_pose(body.enabled)
+        # Loading the pose model can take a second — run it off the event loop
+        # so the toggle responds and other requests aren't frozen.
+        await asyncio.to_thread(stream.set_pose, body.enabled)
     except Exception as exc:
         # Most likely MediaPipe not installed — surface the install hint.
         raise HTTPException(status_code=400, detail=str(exc))
@@ -305,9 +317,9 @@ async def api_toggle_pose(index: int, body: Toggle, request: Request):
 @app.post("/api/director")
 async def api_toggle_director():
     if director is None:
-        start_director()
+        await asyncio.to_thread(start_director)  # OBS connect can block briefly
     else:
-        stop_director()
+        await asyncio.to_thread(stop_director)
     return {"enabled": director is not None} | (
         director.status() if director is not None else {}
     )
@@ -315,13 +327,13 @@ async def api_toggle_director():
 
 @app.post("/api/discover")
 async def api_discover(request: Request):
-    manager.discover(auto_start=True)
+    await asyncio.to_thread(manager.discover, True)
     return {"cameras": _camera_payload(request)}
 
 
 @app.post("/api/cameras/{index}/start")
 async def api_start(index: int, request: Request):
-    info = manager.start(index)
+    info = await asyncio.to_thread(manager.start, index)
     if info is None:
         raise HTTPException(status_code=404, detail="Camera not found")
     if not info.active:
@@ -331,7 +343,7 @@ async def api_start(index: int, request: Request):
 
 @app.post("/api/cameras/{index}/stop")
 async def api_stop(index: int, request: Request):
-    info = manager.stop(index)
+    info = await asyncio.to_thread(manager.stop, index)
     if info is None:
         raise HTTPException(status_code=404, detail="Camera not found")
     return {"camera": next(c for c in _camera_payload(request) if c["index"] == index)}
@@ -343,7 +355,7 @@ async def mjpeg_stream(index: int):
     if stream is None:
         raise HTTPException(status_code=404, detail="Camera not found")
     if not stream.active:
-        started = stream.start()
+        started = await asyncio.to_thread(stream.start)  # opening a camera blocks
         if not started:
             raise HTTPException(
                 status_code=503,
@@ -351,7 +363,7 @@ async def mjpeg_stream(index: int):
             )
 
     return StreamingResponse(
-        stream.mjpeg_generator(),
+        stream.mjpeg_async(),
         media_type="multipart/x-mixed-replace; boundary=frame",
         headers={
             "Cache-Control": "no-cache, no-store, must-revalidate",
@@ -368,7 +380,7 @@ async def snapshot(index: int):
     if stream is None:
         raise HTTPException(status_code=404, detail="Camera not found")
     if not stream.active:
-        stream.start()
+        await asyncio.to_thread(stream.start)
     jpeg = stream.get_jpeg()
     if jpeg is None:
         raise HTTPException(status_code=503, detail="No frame available")

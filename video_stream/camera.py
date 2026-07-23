@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import platform
 import re
 import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Generator
+from typing import AsyncGenerator, Generator
 
 import cv2
 import numpy as np
@@ -319,6 +320,41 @@ class CameraStream:
                     continue
                 if jpeg is last:
                     time.sleep(0.01)
+                    continue
+                last = jpeg
+                yield (
+                    b"--" + boundary + b"\r\n"
+                    b"Content-Type: image/jpeg\r\n"
+                    b"Content-Length: " + str(len(jpeg)).encode() + b"\r\n\r\n"
+                    + jpeg
+                    + b"\r\n"
+                )
+        finally:
+            with self._clients_lock:
+                self._clients = max(0, self._clients - 1)
+                self.stats.clients = self._clients
+
+    async def mjpeg_async(self) -> AsyncGenerator[bytes, None]:
+        """Async variant of mjpeg_generator.
+
+        Frames are encoded on the capture thread; here we only read pre-encoded
+        bytes and ``await asyncio.sleep`` between them. That means a live stream
+        never holds a worker thread and never blocks the event loop, so the UI
+        and other requests stay responsive even with several streams open.
+        """
+        boundary = b"frame"
+        with self._clients_lock:
+            self._clients += 1
+            self.stats.clients = self._clients
+        try:
+            last: bytes | None = None
+            while self._running:
+                jpeg = self.get_jpeg()
+                if jpeg is None:
+                    await asyncio.sleep(0.05)
+                    continue
+                if jpeg is last:
+                    await asyncio.sleep(0.01)
                     continue
                 last = jpeg
                 yield (

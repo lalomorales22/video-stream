@@ -340,6 +340,16 @@
 
   refresh();
   refreshDirector();
+  // Cameras open in the background at startup — poll quickly until they appear,
+  // then settle into the slow refresh.
+  let warmup = 0;
+  const warmupTimer = setInterval(() => {
+    if ((state.cameras || []).length > 0 || warmup++ > 20) {
+      clearInterval(warmupTimer);
+      return;
+    }
+    refresh();
+  }, 1500);
   // Soft poll for status (previews are live MJPEG; this keeps badges/URLs fresh)
   setInterval(() => refresh(), 8000);
   // Director status ticks faster so the "on air" camera stays current
