@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>avatar · video-stream</title>
+  <style>
+    :root { color-scheme: dark; }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: transparent; }
+    /* Transparent by default so OBS composites the avatar with no green screen.
+       The preview backdrop is opt-in (toggle), so it never leaks into OBS. */
+    body.preview-bg {
+      background:
+        linear-gradient(45deg, #14141a 25%, transparent 25%) -10px 0,
+        linear-gradient(-45deg, #14141a 25%, transparent 25%) -10px 0,
+        linear-gradient(45deg, transparent 75%, #14141a 75%),
+        linear-gradient(-45deg, transparent 75%, #14141a 75%);
+      background-size: 20px 20px;
+      background-color: #0c0c0e;
+    }
+    #stage { position: fixed; inset: 0; z-index: 1; }
+    #webcam { display: none; }
+
+    /* Control bar — dims to near-invisible, reveals on hover. In OBS you never
+       hover, so only the avatar shows. */
+    .bar {
+      position: fixed; z-index: 5; left: 50%; bottom: 16px; transform: translateX(-50%);
+      display: flex; gap: 8px; align-items: center; flex-wrap: wrap; justify-content: center;
+      padding: 8px 10px; border-radius: 14px;
+      background: rgba(12,12,14,0.72); border: 1px solid rgba(255,255,255,0.1);
+      backdrop-filter: blur(10px);
+      font: 500 12px/1 "IBM Plex Mono", ui-monospace, monospace; color: #ececf1;
+      opacity: 0.12; transition: opacity .2s ease; max-width: 94vw;
+    }
+    .bar:hover, .bar.show { opacity: 1; }
+    .bar button, .bar select, .bar label.file {
+      font: inherit; color: #ececf1; background: #18181d;
+      border: 1px solid rgba(255,255,255,0.14); border-radius: 999px;
+      padding: 7px 12px; cursor: pointer; white-space: nowrap;
+    }
+    .bar button:hover, .bar label.file:hover { background: #23232a; }
+    .bar button.on { color: #4fd1c5; border-color: rgba(79,209,197,.5); background: rgba(79,209,197,.12); }
+    .bar button.rec { color: #ff3d6e; border-color: rgba(255,61,110,.5); background: rgba(255,61,110,.12); }
+    .bar input[type=file] { display: none; }
+
+    #status {
+      position: fixed; z-index: 6; top: 14px; left: 50%; transform: translateX(-50%);
+      padding: 8px 14px; border-radius: 999px; max-width: 90vw; text-align: center;
+      background: rgba(12,12,14,0.82); border: 1px solid rgba(255,255,255,0.1);
+      font: 500 12px/1.3 "IBM Plex Mono", ui-monospace, monospace; color: #c8c8d2;
+      transition: opacity .3s ease;
+    }
+    #status.err { color: #ff8fa8; border-color: rgba(255,61,110,.4); }
+    #status.hide { opacity: 0; pointer-events: none; }
+    #fps {
+      position: fixed; z-index: 6; top: 14px; right: 14px;
+      font: 500 11px/1 "IBM Plex Mono", monospace; color: rgba(255,255,255,.35);
+    }
+  </style>
+</head>
+<body>
+  <canvas id="stage"></canvas>
+  <video id="webcam" autoplay playsinline muted></video>
+
+  <div id="status">loading…</div>
+  <div id="fps"></div>
+
+  <div class="bar" id="bar">
+    <button id="btn-track" type="button">Start tracking</button>
+    <select id="cam-select" title="Camera"></select>
+    <label class="file" title="Load your own .vrm">Avatar<input id="vrm-file" type="file" accept=".vrm,.glb" /></label>
+    <button id="btn-mirror" class="on" type="button" title="Mirror like a selfie">Mirror</button>
+    <button id="btn-bg" type="button" title="Preview backdrop (not shown in OBS)">Preview&nbsp;bg</button>
+  </div>
+
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "/static/vendor/three.module.js"
+    }
+  }
+  </script>
+  <script type="module" src="/static/js/avatar.js?v={{ asset_v }}"></script>
+</body>
+</html>

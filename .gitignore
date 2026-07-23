@@ -15,3 +15,7 @@ build/
 *.log
 .idea/
 .vscode/
+
+# Avatar (Path B) assets — fetched by ./install-avatar.sh, not committed
+video_stream/static/vendor/
+video_stream/static/models/

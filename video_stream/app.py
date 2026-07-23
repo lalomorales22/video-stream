@@ -256,6 +256,27 @@ async def api_status(request: Request):
     }
 
 
+@app.get("/avatar", response_class=HTMLResponse)
+async def avatar(request: Request):
+    # Assets are opt-in (fetched by ./install-avatar.sh). If they're missing, show
+    # setup instructions instead of a page that fails to import its libraries.
+    if not (STATIC_DIR / "vendor" / "three-vrm.module.js").exists():
+        return HTMLResponse(
+            "<body style='font:16px system-ui;background:#0c0c0e;color:#ececf1;"
+            "max-width:640px;margin:12vh auto;padding:0 24px;line-height:1.6'>"
+            "<h1 style='font-weight:800'>Avatar assets not installed</h1>"
+            "<p>The VTuber avatar needs browser libraries and a face model that aren't "
+            "bundled with the app. Install them once:</p>"
+            "<pre style='background:#18181d;padding:14px 16px;border-radius:10px;"
+            "overflow:auto'>cd " + str(ROOT.parent) + "\n./install-avatar.sh</pre>"
+            "<p>Then reload this page. See <code>path_b.md</code> for details.</p></body>",
+            status_code=503,
+        )
+    return templates.TemplateResponse(
+        request, "avatar.html", {"asset_v": _asset_version()}
+    )
+
+
 @app.get("/api/director")
 async def api_director():
     if director is None:

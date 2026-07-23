@@ -30,6 +30,8 @@ Broadcast every local camera over Wi‑Fi. Each stream gets a shareable URL you 
   camera; the overlay streams straight into OBS with no OBS-side setup
 - [**Auto-director**](#auto-director-hands-free-camera-switching) — scores motion per camera and
   auto-switches OBS to the active one over its WebSocket API, hands-free
+- [**Avatar / VTuber**](#avatar-vtuber-beta) *(beta)* — drive a rigged 3D avatar with your face
+  (head, blinks, mouth) in the browser; renders transparent for OBS
 
 ## Install
 
@@ -284,6 +286,43 @@ The camera index is the same one in the stream URLs (`/stream/0`, `/stream/1`, �
 - **Runs on the OBS box.** Point one `video-stream --director` at your cameras (local
   or remote streams) and let it drive the OBS instance on the same machine.
 
+## Avatar (VTuber, beta)
+
+Drive a rigged **3D avatar** with your face in real time — head turns, blinks, brows,
+and mouth/visemes — rendered on a transparent canvas you drop straight into OBS as a
+**Browser Source**. Everything runs client-side in the browser (MediaPipe face tracking
+→ [Kalidokit](https://github.com/yeemachine/kalidokit) retargeting →
+[three-vrm](https://github.com/pixiv/three-vrm)); the server just serves the page. See
+[`path_b.md`](path_b.md) for the full design.
+
+It's opt-in — the browser libraries + face model (~40 MB) aren't bundled. Install once:
+
+```bash
+./install-avatar.sh
+```
+
+Then start the app and open **`http://<this-machine>:8765/avatar`** (or the **Avatar**
+link in the dashboard). Press **Start tracking**, grant camera access, and your avatar
+mirrors you. Add that same URL as an OBS **Browser Source** (transparent by default) to
+composite the avatar over your scene — no green screen.
+
+**Controls** (bar auto-hides; hover to show — so it never shows in OBS): start/stop
+tracking, camera picker, upload your own `.vrm`, mirror toggle, and a preview backdrop
+(preview only, never sent to OBS).
+
+**Notes:**
+
+- **Bring an avatar.** MVP is face + head only (the close-up "talking as me" case). Use a
+  **VRM** avatar — make one free at [VRoid Studio](https://vroid.com) or grab one from
+  [VRoid Hub](https://hub.vroid.com). Drop it at `static/models/avatar.vrm` or upload it
+  from the page.
+- **Your Tripo/other model needs prep.** A raw GLB/FBX isn't drivable as-is — it needs a
+  humanoid rig ([Mixamo](https://mixamo.com)) and face blendshapes, then conversion to
+  VRM. That's the real time sink; a VRoid avatar "just works." (`path_b.md` §6.)
+- **Runs offline** once installed — libraries are vendored, no CDN at runtime.
+- **Roadmap:** body + hands, high-fidelity face (52 ARKit blendshapes / "PerfectSync"),
+  and tracking from a remote video-stream feed. See `path_b.md` §7.
+
 ## Firewall notes
 
 Allow inbound TCP on the chosen port (default **8765**) so other devices can reach the streams.
@@ -403,6 +442,8 @@ See [Linux notes](#linux-notes) for the rest.
 video-stream/
 ├── install.sh          # one-shot setup + PATH launcher
 ├── install-pose.sh     # optional pose-estimation add-on
+├── install-avatar.sh   # optional VTuber-avatar assets (three-vrm, mediapipe, model)
+├── path_b.md           # avatar feature design doc
 ├── video_stream/
 │   ├── app.py          # FastAPI routes + CLI
 │   ├── camera.py       # discovery & MJPEG capture (per-frame CV hook)
@@ -411,8 +452,8 @@ video-stream/
 │   ├── director.py     # auto-switch OBS to the active camera
 │   ├── obs.py          # minimal OBS WebSocket v5 client
 │   ├── network.py      # LAN IP detection
-│   ├── static/         # CSS / JS
-│   └── templates/      # dashboard + OBS viewer
+│   ├── static/         # CSS / JS (+ vendored avatar libs, gitignored)
+│   └── templates/      # dashboard · OBS viewer · avatar
 ├── requirements.txt
 ├── pyproject.toml
 └── README.md
