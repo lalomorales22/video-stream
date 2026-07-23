@@ -4,7 +4,21 @@ Drive a rigged 3D avatar with your face (and later body) in real time, rendered 
 web page you drop straight into OBS as a **Browser Source** — the exact same pattern
 video-stream already uses for camera views. No third-party VTuber app in the loop.
 
-Status: **planning**. Nothing here is built yet. This is the build spec.
+Status: **MVP built** — face + head tracking works, and the avatar can be driven by the
+local webcam **or** a camera stream (`?src=`), configured entirely by URL for OBS use
+(incl. cross-machine). Verified statically + confirmed working live by the operator
+(face/head/blink/mouth track; arms rest-posed; framing scroll/drag + URL). Remaining:
+body + hands (Phase 3), PerfectSync high-fidelity face (Phase 3.5), AI persona (Path C).
+
+Progress:
+- ✅ Phase 1–2 — `/avatar` page, VRM load, face+head+blink+mouth+gaze, rest pose, framing.
+- ✅ Phase 4 (brought forward) — drive tracking from a video-stream feed (`?src=`), full
+  URL config (`?obs/vrm/mirror/zoom/pan/autostart`), source picker, **Copy OBS URL**.
+  Same-machine verified; **cross-machine needs on-rig testing** (tracking CPU runs on the
+  box that renders the page).
+- ⬜ Phase 3 — body + hands (MediaPipe Pose/Hands + Kalidokit body solvers).
+- ⬜ Phase 3.5 — PerfectSync (52 ARKit blendshapes) for high-fidelity face.
+- ⬜ Path C — AI persona: LLM brain + TTS voice + audio-driven lip-sync.
 
 ---
 

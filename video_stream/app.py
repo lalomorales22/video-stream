@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import mimetypes
 import os
 import threading
 import time
@@ -10,6 +11,10 @@ import webbrowser
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
+
+# Some platforms' mimetypes DB doesn't know .mjs, so StaticFiles would serve it as
+# text/plain and browsers refuse to execute the ES module. Register it explicitly.
+mimetypes.add_type("text/javascript", ".mjs")
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request

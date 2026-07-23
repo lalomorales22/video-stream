@@ -307,8 +307,38 @@ mirrors you. Add that same URL as an OBS **Browser Source** (transparent by defa
 composite the avatar over your scene — no green screen.
 
 **Controls** (bar auto-hides; hover to show — so it never shows in OBS): start/stop
-tracking, camera picker, upload your own `.vrm`, mirror toggle, and a preview backdrop
-(preview only, never sent to OBS).
+tracking, **source picker** (local webcam *or* any of this server's cameras), upload your
+own `.vrm`, mirror toggle, preview backdrop (preview only), and **Copy OBS URL**.
+
+### Using it in OBS (and across machines)
+
+The avatar is a **page you point OBS at**, not a pulled video stream — it renders in the
+browser. That means the tracking runs wherever the page is displayed. Two ways to use it:
+
+- **Same machine:** open `/avatar`, drive it with the local webcam, and add
+  `http://127.0.0.1:8765/avatar?obs=1` as an OBS Browser Source on that machine.
+- **Across your rig (the multi-laptop case):** drive the avatar from a **camera stream**
+  so the camera and the OBS box can be different machines. Point the source at a feed:
+
+  ```
+  http://<camera-machine>:8765/avatar?obs=1&src=/stream/2
+  ```
+
+  OBS on any machine loads that, and the avatar is driven by camera 2 on the camera
+  machine. Everything loads from that one host, so there's no cross-origin hassle.
+
+**Easiest path:** open `/avatar`, set it up the way you want (pick the source, frame it
+with scroll/drag, mirror), then click **Copy OBS URL** — it builds a ready-to-paste
+Browser Source URL (with this machine's LAN IP and your framing baked in) and copies it.
+Paste that into OBS on any machine.
+
+**URL options** (for hands-off OBS sources): `?obs=1` (transparent, no UI) ·
+`?src=/stream/N` (drive from a camera feed) · `?vrm=<url>` · `?mirror=0|1` ·
+`?zoom=<n>` · `?pan=<y>` · `?autostart`.
+
+> Note: the *local webcam* needs a secure context, so it only works on
+> `localhost`/`127.0.0.1` (or HTTPS) — not a bare `http://<lan-ip>`. Over the LAN, use a
+> **camera stream** source (`?src=`), which has no such restriction.
 
 **Notes:**
 
@@ -320,8 +350,8 @@ tracking, camera picker, upload your own `.vrm`, mirror toggle, and a preview ba
   humanoid rig ([Mixamo](https://mixamo.com)) and face blendshapes, then conversion to
   VRM. That's the real time sink; a VRoid avatar "just works." (`path_b.md` §6.)
 - **Runs offline** once installed — libraries are vendored, no CDN at runtime.
-- **Roadmap:** body + hands, high-fidelity face (52 ARKit blendshapes / "PerfectSync"),
-  and tracking from a remote video-stream feed. See `path_b.md` §7.
+- **Roadmap:** body + hands tracking, high-fidelity face (52 ARKit blendshapes /
+  "PerfectSync"), and an AI-persona avatar (LLM + TTS + audio lip-sync). See `path_b.md`.
 
 ## Firewall notes
 

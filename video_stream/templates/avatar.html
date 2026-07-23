@@ -20,7 +20,7 @@
       background-color: #0c0c0e;
     }
     #stage { position: fixed; inset: 0; z-index: 1; }
-    #webcam { display: none; }
+    #webcam, #srcimg { display: none; }
 
     /* Control bar — dims to near-invisible, reveals on hover. In OBS you never
        hover, so only the avatar shows. */
@@ -62,17 +62,49 @@
 <body>
   <canvas id="stage"></canvas>
   <video id="webcam" autoplay playsinline muted></video>
+  <!-- Live MJPEG source when driving the avatar from a camera stream (?src=…). -->
+  <img id="srcimg" crossorigin="anonymous" alt="" />
 
   <div id="status">loading…</div>
   <div id="fps"></div>
 
   <div class="bar" id="bar">
     <button id="btn-track" type="button">Start tracking</button>
-    <select id="cam-select" title="Camera"></select>
+    <select id="src-select" title="Tracking source (local webcam or a camera stream)"></select>
     <label class="file" title="Load your own .vrm">Avatar<input id="vrm-file" type="file" accept=".vrm,.glb" /></label>
     <button id="btn-mirror" class="on" type="button" title="Mirror like a selfie">Mirror</button>
     <button id="btn-bg" type="button" title="Preview backdrop (not shown in OBS)">Preview&nbsp;bg</button>
+    <button id="btn-copy" type="button" title="Copy a ready-to-paste OBS Browser Source URL with the current setup">Copy&nbsp;OBS&nbsp;URL</button>
   </div>
+
+  <!-- Boot setup + watchdog (classic script, so it runs even if the ES module fails
+       to load — which is exactly when we need to tell the user something's wrong). -->
+  <script>
+    (function () {
+      var obs = new URLSearchParams(location.search).has("obs");
+      // In a normal browser show a backdrop + the controls so the page can't look
+      // falsely blank. In OBS (?obs) stay transparent and let the bar auto-hide.
+      if (!obs) {
+        document.body.classList.add("preview-bg");
+        var bar = document.getElementById("bar");
+        if (bar) bar.classList.add("show");
+        var bg = document.getElementById("btn-bg");
+        if (bg) bg.classList.add("on");
+      }
+      window.__avatarBoot = false;
+      setTimeout(function () {
+        if (!window.__avatarBoot) {
+          var s = document.getElementById("status");
+          if (s) {
+            s.className = "err";
+            s.textContent =
+              "Avatar engine didn't start. Open the console (⌥⌘J) for the error, " +
+              "or re-run ./install-avatar.sh. Most often: a stale cached file — hard-reload (⇧⌘R).";
+          }
+        }
+      }, 8000);
+    })();
+  </script>
 
   <script type="importmap">
   {
