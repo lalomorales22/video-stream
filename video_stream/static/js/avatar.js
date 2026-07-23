@@ -46,6 +46,8 @@ const initialSrc = params.get("src"); // e.g. "/stream/2" or "http://host:8765/s
 const initialVrm = params.get("vrm");
 const urlZoom = parseFloat(params.get("zoom"));
 const urlPan = parseFloat(params.get("pan"));
+const urlOx = parseFloat(params.get("ox"));
+const urlOy = parseFloat(params.get("oy"));
 const autostart = params.has("autostart") || !!initialSrc;
 
 const settings = {
@@ -130,11 +132,14 @@ function applyRestPose(vrm) {
 }
 
 // Camera framing state — adjustable live (scroll zoom, drag pan) or via URL.
-const view = { cx: 0, cz: 0, targetY: 1.1, distance: 1.5 };
+// ox/oy are screen-pan offsets so you can position the avatar anywhere.
+const view = { cx: 0, cz: 0, targetY: 1.1, distance: 1.5, ox: 0, oy: 0 };
 
 function updateCamera() {
-  lookTarget.set(view.cx, view.targetY, view.cz);
-  camera.position.set(view.cx, view.targetY + 0.12, view.cz + view.distance);
+  const x = view.cx + view.ox;
+  const y = view.targetY + view.oy;
+  lookTarget.set(x, y, view.cz);
+  camera.position.set(x, y + 0.12, view.cz + view.distance);
   camera.lookAt(lookTarget);
   camera.updateProjectionMatrix();
 }
@@ -146,6 +151,8 @@ function frameOnHead(vrm) {
   if (head) head.getWorldPosition(p);
   view.cx = p.x;
   view.cz = p.z;
+  view.ox = isNaN(urlOx) ? 0 : urlOx;
+  view.oy = isNaN(urlOy) ? 0 : urlOy;
   view.targetY = isNaN(urlPan) ? p.y - 0.35 : urlPan;
   view.distance = isNaN(urlZoom) ? 1.5 : urlZoom;
   updateCamera();
@@ -162,8 +169,10 @@ function frameFullBody(vrm) {
   if (head) head.getWorldPosition(hd);
   view.cx = hp.x;
   view.cz = hp.z;
+  view.ox = isNaN(urlOx) ? 0 : urlOx;
+  view.oy = isNaN(urlOy) ? 0 : urlOy;
   view.targetY = isNaN(urlPan) ? (hp.y + hd.y) / 2 : urlPan;
-  view.distance = isNaN(urlZoom) ? 2.6 : urlZoom;
+  view.distance = isNaN(urlZoom) ? 3.0 : urlZoom;
   updateCamera();
 }
 
@@ -398,10 +407,13 @@ function rigPose(rp) {
     rigRotation("chest", rp.Spine, 0.25, 0.3);
     rigRotation("spine", rp.Spine, 0.45, 0.3);
   }
-  rigRotation("rightUpperArm", rp.RightUpperArm, 1, 0.3);
-  rigRotation("rightLowerArm", rp.RightLowerArm, 1, 0.3);
-  rigRotation("leftUpperArm", rp.LeftUpperArm, 1, 0.3);
-  rigRotation("leftLowerArm", rp.LeftLowerArm, 1, 0.3);
+  // Negate the arm swing axis (z): Kalidokit's arm output comes in vertically
+  // inverted against three-vrm's normalized arm bones, so arms-down read as up.
+  const armFix = (r) => (r ? { x: r.x, y: r.y, z: -r.z } : r);
+  rigRotation("rightUpperArm", armFix(rp.RightUpperArm), 1, 0.3);
+  rigRotation("rightLowerArm", armFix(rp.RightLowerArm), 1, 0.3);
+  rigRotation("leftUpperArm", armFix(rp.LeftUpperArm), 1, 0.3);
+  rigRotation("leftLowerArm", armFix(rp.LeftLowerArm), 1, 0.3);
   rigRotation("rightUpperLeg", rp.RightUpperLeg, 1, 0.3);
   rigRotation("rightLowerLeg", rp.RightLowerLeg, 1, 0.3);
   rigRotation("leftUpperLeg", rp.LeftUpperLeg, 1, 0.3);
@@ -573,6 +585,8 @@ async function copyObsUrl() {
   p.set("mirror", settings.mirror ? "1" : "0");
   p.set("zoom", view.distance.toFixed(2));
   p.set("pan", view.targetY.toFixed(3));
+  if (view.ox) p.set("ox", view.ox.toFixed(3));
+  if (view.oy) p.set("oy", view.oy.toFixed(3));
   const url = `${location.protocol}//${host}/avatar?${p.toString()}`;
   try {
     await navigator.clipboard.writeText(url);
@@ -583,28 +597,36 @@ async function copyObsUrl() {
 }
 els.btnCopy.addEventListener("click", copyObsUrl);
 
-// Scroll to zoom; drag up/down to pan the framing.
+// Scroll to zoom; drag to move the avatar around the screen; double-click to recenter.
 els.canvas.addEventListener(
   "wheel",
   (e) => {
     e.preventDefault();
-    view.distance = clamp(view.distance * (e.deltaY > 0 ? 1.1 : 0.9), 0.3, 5);
+    view.distance = clamp(view.distance * (e.deltaY > 0 ? 1.1 : 0.9), 0.3, 10);
     updateCamera();
   },
   { passive: false }
 );
 let dragging = false;
+let dragX = 0;
 let dragY = 0;
 els.canvas.addEventListener("pointerdown", (e) => {
   dragging = true;
+  dragX = e.clientX;
   dragY = e.clientY;
 });
 window.addEventListener("pointerup", () => (dragging = false));
 window.addEventListener("pointermove", (e) => {
   if (!dragging) return;
-  view.targetY += (e.clientY - dragY) * 0.004;
+  const k = view.distance * 0.0016; // pan speed scales with zoom
+  view.ox -= (e.clientX - dragX) * k; // drag right → avatar moves right
+  view.oy += (e.clientY - dragY) * k; // drag down → avatar moves down
+  dragX = e.clientX;
   dragY = e.clientY;
   updateCamera();
+});
+els.canvas.addEventListener("dblclick", () => {
+  if (currentVrm) (settings.body ? frameFullBody : frameOnHead)(currentVrm);
 });
 
 // ── boot ──────────────────────────────────────────────────────────────
