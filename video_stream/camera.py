@@ -85,6 +85,7 @@ class CameraStream:
         pose_enabled: bool = False,
         pose_variant: str = "lite",
         pose_stride: int = 2,
+        motion_enabled: bool = False,
     ) -> None:
         self.index = index
         self.name = name
@@ -96,6 +97,9 @@ class CameraStream:
         self.pose_variant = pose_variant
         self.pose_stride = pose_stride
         self._pose = None  # built lazily on start(), owned by the capture thread
+        self.motion_enabled = motion_enabled
+        self.motion_score = 0.0
+        self._motion = None  # MotionScorer, built on start()
         self.stats = StreamStats()
 
         self._cap: cv2.VideoCapture | None = None
@@ -156,6 +160,10 @@ class CameraStream:
         self._actual_fps = float(cap.get(cv2.CAP_PROP_FPS) or self.target_fps)
 
         self._maybe_init_pose()
+        if self.motion_enabled and self._motion is None:
+            from video_stream.motion import MotionScorer
+
+            self._motion = MotionScorer()
 
         self._cap = cap
         self._running = True
@@ -224,6 +232,10 @@ class CameraStream:
                 self.stats.dropped += 1
                 time.sleep(0.02)
                 continue
+
+            # Score motion on the raw frame, before any overlay is drawn on it.
+            if self._motion is not None:
+                self.motion_score = self._motion.update(frame)
 
             self._encode_frame(self._apply_pose(frame))
             self.stats.frames += 1
@@ -323,6 +335,7 @@ class CameraManager:
         pose_enabled: bool = False,
         pose_variant: str = "lite",
         pose_stride: int = 2,
+        motion_enabled: bool = False,
     ) -> None:
         self.max_probe = max_probe
         self.width = width
@@ -332,6 +345,7 @@ class CameraManager:
         self.pose_enabled = pose_enabled
         self.pose_variant = pose_variant
         self.pose_stride = pose_stride
+        self.motion_enabled = motion_enabled
         self._streams: dict[int, CameraStream] = {}
         self._lock = threading.Lock()
 
@@ -377,6 +391,7 @@ class CameraManager:
                 pose_enabled=self.pose_enabled,
                 pose_variant=self.pose_variant,
                 pose_stride=self.pose_stride,
+                motion_enabled=self.motion_enabled,
             )
             with self._lock:
                 self._streams[index] = stream

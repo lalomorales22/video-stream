@@ -21,6 +21,7 @@ Broadcast every local camera over Wi‑Fi. Each stream gets a shareable URL you 
 - Live mini previews in a sleek black UI
 - Start / stop per camera, rescan devices
 - Optional **live pose skeleton** overlay (motion tracking) that streams straight into OBS
+- Optional **auto-director** — switches OBS to the most active camera hands-free
 - One-command install + `video-stream` launcher that opens the app
 
 ## Install
@@ -217,6 +218,56 @@ The model (~5 MB for `lite`) downloads once on first use and is cached under
 Pose estimation is the first CV feature; object detection and background removal
 are natural next steps on the same per-frame hook in `video_stream/camera.py`.
 
+## Auto-director (hands-free camera switching)
+
+Turns a multi-camera rig into a self-operating one: it scores motion on each camera
+and automatically switches OBS to whichever one is **active** — no keyboard, no
+second operator. It talks to OBS over the built-in [OBS WebSocket](https://github.com/obsproject/obs-websocket),
+so no extra dependency is needed.
+
+**Try it first in dry-run** (watch it decide without touching OBS):
+
+```bash
+video-stream --director --director-dry-run --obs-scene-map "0=Cam A,1=Cam B,2=Cam C"
+```
+
+Then open `http://127.0.0.1:8765/api/director` (or watch the console) to see live
+motion scores, the current active camera, and recent switches. Tune from there.
+
+**Wire it to OBS for real:**
+
+1. In OBS: **Tools → WebSocket Server Settings → Enable**. Note the port (default
+   `4455`) and password.
+2. Make sure your camera scenes exist in OBS, then map each camera to its scene:
+
+   ```bash
+   video-stream --director \
+     --obs-scene-map "0=Cam A,1=Cam B,2=Cam C" \
+     --obs-password "YOUR_OBS_PASSWORD"
+   ```
+
+The camera index is the same one in the stream URLs (`/stream/0`, `/stream/1`, …).
+
+**Tuning:**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--director-hold` | `1.5` | Seconds a camera must stay most-active before cutting to it |
+| `--director-cooldown` | `3.0` | Minimum seconds between cuts (prevents rapid flip-flopping) |
+| `--director-min-score` | `0.02` | Motion score (0–1) a camera must clear to count as active |
+| `--obs-host` / `--obs-port` | `127.0.0.1` / `4455` | Where OBS WebSocket is listening |
+
+**Notes:**
+
+- **Motion-based, not person-based (yet).** "Active" means *most movement*. It's cheap
+  (pure OpenCV, no ML) and works well for talking-head / presenter switching. A fan or
+  a screen in view can register as motion — aim cameras accordingly, or raise
+  `--director-min-score`.
+- **Safe by default.** If OBS isn't reachable it logs intended switches instead of
+  crashing, so the stream keeps running. `--director-dry-run` forces log-only.
+- **Runs on the OBS box.** Point one `video-stream --director` at your cameras (local
+  or remote streams) and let it drive the OBS instance on the same machine.
+
 ## Firewall notes
 
 Allow inbound TCP on the chosen port (default **8765**) so other devices can reach the streams.
@@ -340,6 +391,9 @@ video-stream/
 │   ├── app.py          # FastAPI routes + CLI
 │   ├── camera.py       # discovery & MJPEG capture (per-frame CV hook)
 │   ├── pose.py         # optional MediaPipe pose overlay
+│   ├── motion.py       # cheap per-camera motion scoring
+│   ├── director.py     # auto-switch OBS to the active camera
+│   ├── obs.py          # minimal OBS WebSocket v5 client
 │   ├── network.py      # LAN IP detection
 │   ├── static/         # CSS / JS
 │   └── templates/      # dashboard + OBS viewer

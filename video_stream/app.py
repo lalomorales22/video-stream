@@ -19,6 +19,8 @@ from fastapi.templating import Jinja2Templates
 
 from video_stream import __version__
 from video_stream.camera import CameraManager
+from video_stream.director import Director, DirectorConfig
+from video_stream.obs import OBSClient
 from video_stream.network import get_local_ips, primary_ip
 
 ROOT = Path(__file__).resolve().parent
@@ -26,6 +28,7 @@ STATIC_DIR = ROOT / "static"
 TEMPLATES_DIR = ROOT / "templates"
 
 manager = CameraManager()
+director: Director | None = None
 config: dict[str, Any] = {
     "host": "0.0.0.0",
     "port": 8765,
@@ -36,6 +39,15 @@ config: dict[str, Any] = {
     "pose": False,
     "pose_model": "lite",
     "pose_stride": 2,
+    "director": False,
+    "director_dry_run": False,
+    "director_hold": 1.5,
+    "director_cooldown": 3.0,
+    "director_min_score": 0.02,
+    "obs_host": "127.0.0.1",
+    "obs_port": 4455,
+    "obs_password": "",
+    "obs_scene_map": {},
 }
 
 
@@ -48,8 +60,35 @@ async def lifespan(_app: FastAPI):
     manager.pose_enabled = config["pose"]
     manager.pose_variant = config["pose_model"]
     manager.pose_stride = config["pose_stride"]
+    manager.motion_enabled = config["director"]  # scoring only when directing
     manager.discover(auto_start=True)
+
+    global director
+    if config["director"]:
+        obs = None
+        if not config["director_dry_run"]:
+            obs = OBSClient(
+                host=config["obs_host"],
+                port=config["obs_port"],
+                password=config["obs_password"],
+            )
+        director = Director(
+            manager,
+            obs_client=obs,
+            config=DirectorConfig(
+                scene_map=config["obs_scene_map"],
+                min_score=config["director_min_score"],
+                hold=config["director_hold"],
+                cooldown=config["director_cooldown"],
+                dry_run=config["director_dry_run"],
+            ),
+        )
+        director.start()
+
     yield
+
+    if director is not None:
+        director.stop()
     manager.stop_all()
 
 
@@ -182,6 +221,13 @@ async def api_status(request: Request):
     }
 
 
+@app.get("/api/director")
+async def api_director():
+    if director is None:
+        return {"enabled": False}
+    return {"enabled": True, **director.status()}
+
+
 @app.post("/api/discover")
 async def api_discover(request: Request):
     manager.discover(auto_start=True)
@@ -285,6 +331,42 @@ def build_parser() -> argparse.ArgumentParser:
         default=2,
         help="Run pose inference every Nth frame (default 2); higher = lighter CPU",
     )
+    p.add_argument(
+        "--director",
+        action="store_true",
+        help="Auto-switch OBS to the most active camera (see --obs-* flags)",
+    )
+    p.add_argument(
+        "--director-dry-run",
+        action="store_true",
+        help="Log intended camera switches without touching OBS (great for tuning)",
+    )
+    p.add_argument(
+        "--obs-scene-map",
+        default="",
+        help='Map cameras to OBS scenes, e.g. "0=Cam A,1=Cam B,2=Cam C"',
+    )
+    p.add_argument("--obs-host", default="127.0.0.1", help="OBS WebSocket host")
+    p.add_argument("--obs-port", type=int, default=4455, help="OBS WebSocket port")
+    p.add_argument("--obs-password", default="", help="OBS WebSocket password")
+    p.add_argument(
+        "--director-hold",
+        type=float,
+        default=1.5,
+        help="Seconds a camera must stay most-active before cutting to it",
+    )
+    p.add_argument(
+        "--director-cooldown",
+        type=float,
+        default=3.0,
+        help="Minimum seconds between camera switches",
+    )
+    p.add_argument(
+        "--director-min-score",
+        type=float,
+        default=0.02,
+        help="Motion score a camera must clear to be considered active (0–1)",
+    )
     p.add_argument("--reload", action="store_true", help="Dev auto-reload")
     p.add_argument(
         "--open",
@@ -315,6 +397,21 @@ def _open_dashboard(port: int, delay: float = 1.0) -> None:
     threading.Thread(target=_run, name="open-browser", daemon=True).start()
 
 
+def _parse_scene_map(raw: str) -> dict[int, str]:
+    """Parse "0=Cam A,1=Cam B" into {0: 'Cam A', 1: 'Cam B'}."""
+    mapping: dict[int, str] = {}
+    for pair in raw.split(","):
+        pair = pair.strip()
+        if not pair or "=" not in pair:
+            continue
+        idx, _, name = pair.partition("=")
+        try:
+            mapping[int(idx.strip())] = name.strip()
+        except ValueError:
+            continue
+    return mapping
+
+
 def _preflight_pose(variant: str) -> None:
     """Check pose deps once at startup so failures are loud, not silent.
 
@@ -337,6 +434,23 @@ def _preflight_pose(variant: str) -> None:
     print(f"  [pose] enabled · model={variant} · overlay flows through to OBS")
 
 
+def _preflight_director() -> None:
+    dry = config["director_dry_run"]
+    smap = config["obs_scene_map"]
+    print("  [director] auto-switching enabled")
+    if dry:
+        print("  [director] DRY RUN — will log intended switches, won't touch OBS")
+    else:
+        print(f"  [director] OBS target ws://{config['obs_host']}:{config['obs_port']}")
+        print("  [director] enable it in OBS: Tools → WebSocket Server Settings")
+    if smap:
+        pairs = ", ".join(f"{i}→'{s}'" for i, s in sorted(smap.items()))
+        print(f"  [director] scene map: {pairs}")
+    elif not dry:
+        print("  [director] no --obs-scene-map given; switches have no scene target")
+    print("  [director] watch live: GET /api/director")
+
+
 def main(argv: list[str] | None = None) -> None:
     args = build_parser().parse_args(argv)
     config.update(
@@ -350,11 +464,22 @@ def main(argv: list[str] | None = None) -> None:
             "pose": args.pose,
             "pose_model": args.pose_model,
             "pose_stride": args.pose_stride,
+            "director": args.director,
+            "director_dry_run": args.director_dry_run,
+            "director_hold": args.director_hold,
+            "director_cooldown": args.director_cooldown,
+            "director_min_score": args.director_min_score,
+            "obs_host": args.obs_host,
+            "obs_port": args.obs_port,
+            "obs_password": args.obs_password,
+            "obs_scene_map": _parse_scene_map(args.obs_scene_map),
         }
     )
 
     if args.pose:
         _preflight_pose(args.pose_model)
+    if args.director:
+        _preflight_director()
 
     lan = primary_ip()
     print()
