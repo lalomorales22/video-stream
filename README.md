@@ -342,10 +342,12 @@ Paste that into OBS on any machine.
 
 **Notes:**
 
-- **Bring an avatar.** MVP is face + head only (the close-up "talking as me" case). Use a
-  **VRM** avatar — make one free at [VRoid Studio](https://vroid.com) or grab one from
-  [VRoid Hub](https://hub.vroid.com). Drop it at `static/models/avatar.vrm` or upload it
-  from the page.
+- **Bring an avatar.** Use a **VRM** avatar — make one free at
+  [VRoid Studio](https://vroid.com) or grab one from [VRoid Hub](https://hub.vroid.com).
+  Drop it at `static/models/avatar.vrm` or upload it from the page.
+- **Full body (beta).** The **Full body** button adds arms/legs/torso tracking (MediaPipe
+  Pose). Stand back so your body is in frame; it auto-widens the shot. Legs get jittery
+  when your lower body is out of frame — face-only stays cleaner for a seated close-up.
 - **Your Tripo/other model needs prep.** A raw GLB/FBX isn't drivable as-is — it needs a
   humanoid rig ([Mixamo](https://mixamo.com)) and face blendshapes, then conversion to
   VRM. That's the real time sink; a VRoid avatar "just works." (`path_b.md` §6.)

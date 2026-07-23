@@ -17,10 +17,11 @@ import * as THREE from "three";
 import { GLTFLoader } from "/static/vendor/jsm/loaders/GLTFLoader.js";
 import { VRMLoaderPlugin, VRMUtils } from "/static/vendor/three-vrm.module.js";
 import * as Kalidokit from "/static/vendor/kalidokit.es.js";
-import { FaceLandmarker, FilesetResolver } from "/static/vendor/mediapipe/vision_bundle.mjs";
+import { FaceLandmarker, PoseLandmarker, FilesetResolver } from "/static/vendor/mediapipe/vision_bundle.mjs";
 
 const DEFAULT_VRM = "/static/models/avatar.vrm";
 const FACE_MODEL = "/static/models/face_landmarker.task";
+const POSE_MODEL = "/static/models/pose_landmarker_full.task";
 const WASM_PATH = "/static/vendor/mediapipe/wasm";
 
 const els = {
@@ -33,6 +34,7 @@ const els = {
   btnTrack: document.getElementById("btn-track"),
   srcSelect: document.getElementById("src-select"),
   vrmFile: document.getElementById("vrm-file"),
+  btnBody: document.getElementById("btn-body"),
   btnMirror: document.getElementById("btn-mirror"),
   btnBg: document.getElementById("btn-bg"),
   btnCopy: document.getElementById("btn-copy"),
@@ -46,7 +48,11 @@ const urlZoom = parseFloat(params.get("zoom"));
 const urlPan = parseFloat(params.get("pan"));
 const autostart = params.has("autostart") || !!initialSrc;
 
-const settings = { mirror: params.get("mirror") !== "0", tracking: false };
+const settings = {
+  mirror: params.get("mirror") !== "0",
+  body: params.get("body") === "1", // full-body (arms/legs/torso) tracking
+  tracking: false,
+};
 // Current tracking source: a local webcam, or a camera stream URL.
 let source = initialSrc
   ? { kind: "stream", url: initialSrc }
@@ -55,6 +61,7 @@ let source = initialSrc
 let currentVrm = null;
 let currentVrmUrl = initialVrm || DEFAULT_VRM;
 let faceLandmarker = null;
+let poseLandmarker = null;
 let stream = null;
 
 function setStatus(msg, isError = false, autohide = false) {
@@ -144,6 +151,22 @@ function frameOnHead(vrm) {
   updateCamera();
 }
 
+// Wider framing for full-body mode (head to feet-ish).
+function frameFullBody(vrm) {
+  vrm.scene.updateMatrixWorld(true);
+  const hips = vrm.humanoid?.getNormalizedBoneNode("hips");
+  const head = vrm.humanoid?.getNormalizedBoneNode("head");
+  const hp = new THREE.Vector3(0, 0.9, 0);
+  const hd = new THREE.Vector3(0, 1.4, 0);
+  if (hips) hips.getWorldPosition(hp);
+  if (head) head.getWorldPosition(hd);
+  view.cx = hp.x;
+  view.cz = hp.z;
+  view.targetY = isNaN(urlPan) ? (hp.y + hd.y) / 2 : urlPan;
+  view.distance = isNaN(urlZoom) ? 2.6 : urlZoom;
+  updateCamera();
+}
+
 // ── VRM loading ───────────────────────────────────────────────────────
 async function loadVRM(url) {
   setStatus("loading avatar…");
@@ -163,7 +186,8 @@ async function loadVRM(url) {
     vrm.scene.traverse((o) => (o.frustumCulled = false));
     scene.add(vrm.scene);
     applyRestPose(vrm);
-    frameOnHead(vrm);
+    if (settings.body) frameFullBody(vrm);
+    else frameOnHead(vrm);
     setStatus(settings.tracking ? "tracking" : "avatar loaded — press Start tracking", false, settings.tracking);
   } catch (err) {
     console.error(err);
@@ -171,15 +195,28 @@ async function loadVRM(url) {
   }
 }
 
-// ── MediaPipe face landmarker ─────────────────────────────────────────
+// ── MediaPipe trackers ────────────────────────────────────────────────
+let fileset = null;
+async function getFileset() {
+  if (!fileset) fileset = await FilesetResolver.forVisionTasks(WASM_PATH);
+  return fileset;
+}
+
 async function initFaceLandmarker() {
-  const fileset = await FilesetResolver.forVisionTasks(WASM_PATH);
-  faceLandmarker = await FaceLandmarker.createFromOptions(fileset, {
+  faceLandmarker = await FaceLandmarker.createFromOptions(await getFileset(), {
     baseOptions: { modelAssetPath: FACE_MODEL, delegate: "GPU" },
     runningMode: "VIDEO",
     numFaces: 1,
     outputFaceBlendshapes: true,
     outputFacialTransformationMatrixes: true,
+  });
+}
+
+async function initPose() {
+  poseLandmarker = await PoseLandmarker.createFromOptions(await getFileset(), {
+    baseOptions: { modelAssetPath: POSE_MODEL, delegate: "GPU" },
+    runningMode: "VIDEO",
+    numPoses: 1,
   });
 }
 
@@ -253,29 +290,45 @@ async function startSource(src) {
 }
 
 // Returns the current frame as a MediaPipe ImageSource plus its dimensions.
+// Always routed through the work canvas so we can mirror the *frame* (rather than
+// negating each bone) — that keeps face and body mirroring consistent.
 function currentFrame() {
+  let img, w, h;
   if (source.kind === "webcam") {
     if (els.video.readyState < 2 || !els.video.videoWidth) return null;
-    return { image: els.video, w: els.video.videoWidth, h: els.video.videoHeight };
+    img = els.video;
+    w = els.video.videoWidth;
+    h = els.video.videoHeight;
+  } else {
+    img = els.srcImg;
+    if (!img.naturalWidth) return null;
+    w = img.naturalWidth;
+    h = img.naturalHeight;
   }
-  const img = els.srcImg;
-  if (!img.naturalWidth) return null;
-  if (work.width !== img.naturalWidth) {
-    work.width = img.naturalWidth;
-    work.height = img.naturalHeight;
+  if (work.width !== w || work.height !== h) {
+    work.width = w;
+    work.height = h;
   }
-  workCtx.drawImage(img, 0, 0);
-  return { image: work, w: work.width, h: work.height };
+  workCtx.save();
+  if (settings.mirror) {
+    workCtx.translate(w, 0);
+    workCtx.scale(-1, 1);
+  }
+  workCtx.drawImage(img, 0, 0, w, h);
+  workCtx.restore();
+  return { image: work, w, h };
 }
 
 // ── retargeting: Kalidokit rig → VRM ──────────────────────────────────
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 
 function rigRotation(name, rot, dampen = 1, lerp = 0.3) {
+  if (!rot) return;
   const bone = currentVrm?.humanoid?.getNormalizedBoneNode(name);
   if (!bone) return;
-  const m = settings.mirror ? -1 : 1;
-  const euler = new THREE.Euler(rot.x * dampen, rot.y * dampen * m, rot.z * dampen * m, "XYZ");
+  // Mirroring is handled by flipping the input frame (see currentFrame), so no
+  // per-bone negation is needed here.
+  const euler = new THREE.Euler(rot.x * dampen, rot.y * dampen, rot.z * dampen, "XYZ");
   const q = new THREE.Quaternion().setFromEuler(euler);
   bone.quaternion.slerp(q, lerp);
 }
@@ -302,7 +355,7 @@ function rigFace(rf) {
 
   if (typeof rf.brow === "number") expr("surprised", clamp(rf.brow * 1.4, 0, 1), 0.3);
 
-  const px = (settings.mirror ? -1 : 1) * (rf.pupil?.x ?? 0);
+  const px = rf.pupil?.x ?? 0; // frame is already mirrored when needed
   const py = rf.pupil?.y ?? 0;
   expr("lookLeft", clamp(px, 0, 1), 0.5);
   expr("lookRight", clamp(-px, 0, 1), 0.5);
@@ -335,6 +388,24 @@ function applyIdle(t) {
   const cyc = t % 4.5;
   const b = cyc < 0.14 ? Math.sin((cyc / 0.14) * Math.PI) : 0;
   expr("blink", b, 0.6);
+}
+
+// Body pose (arms, legs, torso) from Kalidokit's pose solver.
+function rigPose(rp) {
+  if (!rp) return;
+  if (rp.Hips) rigRotation("hips", rp.Hips.rotation, 0.7, 0.3);
+  if (rp.Spine) {
+    rigRotation("chest", rp.Spine, 0.25, 0.3);
+    rigRotation("spine", rp.Spine, 0.45, 0.3);
+  }
+  rigRotation("rightUpperArm", rp.RightUpperArm, 1, 0.3);
+  rigRotation("rightLowerArm", rp.RightLowerArm, 1, 0.3);
+  rigRotation("leftUpperArm", rp.LeftUpperArm, 1, 0.3);
+  rigRotation("leftLowerArm", rp.LeftLowerArm, 1, 0.3);
+  rigRotation("rightUpperLeg", rp.RightUpperLeg, 1, 0.3);
+  rigRotation("rightLowerLeg", rp.RightLowerLeg, 1, 0.3);
+  rigRotation("leftUpperLeg", rp.LeftUpperLeg, 1, 0.3);
+  rigRotation("leftLowerLeg", rp.LeftLowerLeg, 1, 0.3);
 }
 
 // ── main loop ─────────────────────────────────────────────────────────
@@ -375,6 +446,20 @@ function animate() {
           if (rf) {
             rigFace(rf);
             lastFaceAt = now;
+          }
+        }
+        // Full-body pose (opt-in) — arms, legs, torso.
+        if (settings.body && poseLandmarker) {
+          const pres = poseLandmarker.detectForVideo(frame.image, now);
+          const p3d = pres.worldLandmarks?.[0];
+          const p2d = pres.landmarks?.[0];
+          if (p3d && p2d) {
+            const rp = Kalidokit.Pose.solve(p3d, p2d, {
+              runtime: "mediapipe",
+              imageSize: { width: frame.w, height: frame.h },
+              enableLegs: true,
+            });
+            if (rp) rigPose(rp);
           }
         }
         frames++;
@@ -435,6 +520,30 @@ els.vrmFile.addEventListener("change", (e) => {
   }
 });
 
+async function setBody(on) {
+  settings.body = on;
+  els.btnBody.classList.toggle("on", on);
+  if (on) {
+    if (!poseLandmarker) {
+      setStatus("loading body model…");
+      await initPose();
+    }
+    if (currentVrm) frameFullBody(currentVrm);
+    setStatus("full-body tracking on — stand back so your body is in frame", false, true);
+  } else if (currentVrm) {
+    applyRestPose(currentVrm); // arms back to rest
+    frameOnHead(currentVrm);
+    setStatus("full-body off", false, true);
+  }
+}
+els.btnBody.addEventListener("click", () =>
+  setBody(!settings.body).catch((e) => {
+    settings.body = false;
+    els.btnBody.classList.remove("on");
+    setStatus("body model failed: " + (e?.message || e), true);
+  })
+);
+
 els.btnMirror.addEventListener("click", () => {
   settings.mirror = !settings.mirror;
   els.btnMirror.classList.toggle("on", settings.mirror);
@@ -460,6 +569,7 @@ async function copyObsUrl() {
   if (source.kind === "stream") p.set("src", source.url);
   else p.set("autostart", "1");
   if (currentVrmUrl && currentVrmUrl !== DEFAULT_VRM) p.set("vrm", currentVrmUrl);
+  if (settings.body) p.set("body", "1");
   p.set("mirror", settings.mirror ? "1" : "0");
   p.set("zoom", view.distance.toFixed(2));
   p.set("pan", view.targetY.toFixed(3));
@@ -500,9 +610,11 @@ window.addEventListener("pointermove", (e) => {
 // ── boot ──────────────────────────────────────────────────────────────
 window.__avatarBoot = true; // tells the HTML watchdog the module started OK
 els.btnMirror.classList.toggle("on", settings.mirror);
+els.btnBody.classList.toggle("on", settings.body);
 animate();
 loadVRM(currentVrmUrl);
 populateSources();
+if (settings.body) initPose().catch((e) => setStatus("body model: " + (e?.message || e), true));
 if (autostart) {
   startTracking();
 } else {

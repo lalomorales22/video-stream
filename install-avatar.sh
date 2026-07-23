@@ -60,6 +60,11 @@ fetch "${MODELS}/face_landmarker.task" \
   "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/latest/face_landmarker.task"
 ok "face model"
 
+info "pose landmarker model (full body, ~9 MB)"
+fetch "${MODELS}/pose_landmarker_full.task" \
+  "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/latest/pose_landmarker_full.task"
+ok "pose model"
+
 echo
 if [[ -f "${MODELS}/avatar.vrm" ]]; then
   ok "default avatar present ($(du -h "${MODELS}/avatar.vrm" | cut -f1))"

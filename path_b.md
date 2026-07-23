@@ -16,7 +16,9 @@ Progress:
   URL config (`?obs/vrm/mirror/zoom/pan/autostart`), source picker, **Copy OBS URL**.
   Same-machine verified; **cross-machine needs on-rig testing** (tracking CPU runs on the
   box that renders the page).
-- ⬜ Phase 3 — body + hands (MediaPipe Pose/Hands + Kalidokit body solvers).
+- 🟡 Phase 3 — **body** built (MediaPipe Pose + Kalidokit → arms/legs/torso, "Full body"
+  toggle, wider auto-framing). Needs on-rig tuning (mirror L/R, leg jitter when the lower
+  body is out of frame). Hands/fingers (HandLandmarker) still to come.
 - ⬜ Phase 3.5 — PerfectSync (52 ARKit blendshapes) for high-fidelity face.
 - ⬜ Path C — AI persona: LLM brain + TTS voice + audio-driven lip-sync.
 
