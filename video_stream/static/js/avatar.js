@@ -93,6 +93,10 @@ camera.lookAt(lookTarget);
 const key = new THREE.DirectionalLight(0xffffff, Math.PI);
 key.position.set(1, 1.5, 1.2);
 scene.add(key);
+// Cool rim light from behind/side for a little dimension.
+const rim = new THREE.DirectionalLight(0x88aaff, Math.PI * 0.5);
+rim.position.set(-1.2, 1.4, -1.0);
+scene.add(rim);
 scene.add(new THREE.AmbientLight(0xffffff, Math.PI * 0.4));
 
 function resize() {
@@ -306,6 +310,33 @@ function rigFace(rf) {
   expr("lookDown", clamp(py, 0, 1), 0.5);
 }
 
+// ── idle liveliness ───────────────────────────────────────────────────
+// Keeps the avatar breathing/blinking/swaying so she's alive even when no face
+// is being tracked. Breathing is always on (doesn't touch the tracked bones);
+// the blink + sway only fill in when a face hasn't been seen recently.
+let lastFaceAt = -1e9;
+
+function applyBreathing(t) {
+  const h = currentVrm?.humanoid;
+  const chest =
+    h?.getNormalizedBoneNode("chest") ||
+    h?.getNormalizedBoneNode("upperChest") ||
+    h?.getNormalizedBoneNode("spine");
+  if (chest) chest.rotation.x = Math.sin(t * 1.1) * 0.022;
+}
+
+function applyIdle(t) {
+  const neck = currentVrm?.humanoid?.getNormalizedBoneNode("neck");
+  if (neck) {
+    const e = new THREE.Euler(Math.sin(t * 0.5) * 0.03, Math.sin(t * 0.35) * 0.07, 0);
+    neck.quaternion.slerp(new THREE.Quaternion().setFromEuler(e), 0.05);
+  }
+  // Natural auto-blink roughly every ~4.5s.
+  const cyc = t % 4.5;
+  const b = cyc < 0.14 ? Math.sin((cyc / 0.14) * Math.PI) : 0;
+  expr("blink", b, 0.6);
+}
+
 // ── main loop ─────────────────────────────────────────────────────────
 const clock = new THREE.Clock();
 let lastWebcamTime = -1;
@@ -341,7 +372,10 @@ function animate() {
             imageSize: { width: frame.w, height: frame.h },
             smoothBlink: true,
           });
-          if (rf) rigFace(rf);
+          if (rf) {
+            rigFace(rf);
+            lastFaceAt = now;
+          }
         }
         frames++;
         if (now - fpsAt > 1000) {
@@ -353,7 +387,12 @@ function animate() {
     }
   }
 
-  if (currentVrm) currentVrm.update(dt);
+  if (currentVrm) {
+    const tSec = clock.elapsedTime;
+    applyBreathing(tSec);
+    if (performance.now() - lastFaceAt > 400) applyIdle(tSec); // fill in when untracked
+    currentVrm.update(dt);
+  }
   renderer.render(scene, camera);
 }
 
