@@ -19,7 +19,10 @@ import { VRMLoaderPlugin, VRMUtils } from "/static/vendor/three-vrm.module.js";
 import * as Kalidokit from "/static/vendor/kalidokit.es.js";
 import { FaceLandmarker, PoseLandmarker, FilesetResolver } from "/static/vendor/mediapipe/vision_bundle.mjs";
 
-const DEFAULT_VRM = "/static/models/avatar.vrm";
+// Cache-busted by the static-tree mtime token: swapping avatar.vrm on disk
+// changes the URL, so browsers and OBS fetch the new model instead of the
+// cached old one; an unchanged model stays cached.
+const DEFAULT_VRM = "/static/models/avatar.vrm?v=" + (window.ASSET_V || Date.now());
 const FACE_MODEL = "/static/models/face_landmarker.task";
 const POSE_MODEL = "/static/models/pose_landmarker_full.task";
 const WASM_PATH = "/static/vendor/mediapipe/wasm";

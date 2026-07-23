@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>video-stream · stinger overlay</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      width: 100vw;
+      height: 100vh;
+      background: transparent;
+      overflow: hidden;
+      font-family: -apple-system, Inter, "Segoe UI", sans-serif;
+    }
+    /* Swipe: two skewed bars cross the frame in opposite directions. */
+    .bar {
+      position: fixed;
+      top: -10vh;
+      height: 120vh;
+      width: 130vw;
+      transform: translateX(-140vw) skewX(-12deg);
+      pointer-events: none;
+    }
+    .bar-a { background: linear-gradient(90deg, transparent, #ff3d6e 30%, #ff3d6e 70%, transparent); opacity: 0.92; }
+    .bar-b { background: linear-gradient(90deg, transparent, #4fd1c5 30%, #4fd1c5 70%, transparent); opacity: 0.85; }
+    .play .bar-a { animation: sweep 0.5s cubic-bezier(0.7, 0, 0.3, 1) forwards; }
+    .play .bar-b { animation: sweep 0.5s cubic-bezier(0.7, 0, 0.3, 1) 0.06s forwards; }
+    @keyframes sweep {
+      0% { transform: translateX(-140vw) skewX(-12deg); }
+      100% { transform: translateX(140vw) skewX(-12deg); }
+    }
+    /* Fade: triangular dip to black (or white). */
+    #fade {
+      position: fixed;
+      inset: 0;
+      background: #000;
+      opacity: 0;
+      pointer-events: none;
+    }
+    .play #fade.on { animation: dip 0.5s linear forwards; }
+    @keyframes dip {
+      0% { opacity: 0; }
+      50% { opacity: 1; }
+      100% { opacity: 0; }
+    }
+    /* Glitch: full-frame jittering color slices (transform set from JS). */
+    .slice {
+      position: fixed;
+      left: 0;
+      width: 100vw;
+      height: 34vh;
+      opacity: 0;
+      pointer-events: none;
+      mix-blend-mode: screen;
+    }
+    #slice-a { top: 0; background: rgba(255, 61, 110, 0.35); }
+    #slice-b { top: 33vh; background: rgba(79, 209, 197, 0.35); }
+    #slice-c { top: 66vh; background: rgba(255, 255, 255, 0.18); }
+  </style>
+</head>
+<body>
+  <div class="bar bar-a"></div>
+  <div class="bar bar-b"></div>
+  <div id="fade"></div>
+  <div class="slice" id="slice-a"></div>
+  <div class="slice" id="slice-b"></div>
+  <div class="slice" id="slice-c"></div>
+
+  <script src="/static/js/bus.js?v={{ asset_v }}"></script>
+  <script>
+    // ?style=swipe|glitch|fade (default swipe) — pick per OBS browser source.
+    const style = new URLSearchParams(location.search).get("style") || "swipe";
+    const fadeEl = document.getElementById("fade");
+    const slices = ["slice-a", "slice-b", "slice-c"].map((id) => document.getElementById(id));
+    let playing = false;
+
+    // Deterministic pseudo-random in [-0.5, 0.5) — ChromaCanvas's glitch
+    // jitter, stepped at ~30Hz for the choppy feel.
+    function jitter(t, salt) {
+      const v = Math.sin(t * 137.31 + salt * 91.7) * 43758.5453;
+      return v - Math.floor(v) - 0.5;
+    }
+
+    function playGlitch(duration) {
+      const start = performance.now();
+      slices.forEach((s) => (s.style.opacity = "1"));
+      function frame(now) {
+        const elapsed = now - start;
+        if (elapsed > duration) {
+          slices.forEach((s) => {
+            s.style.opacity = "0";
+            s.style.transform = "";
+          });
+          playing = false;
+          return;
+        }
+        const step = Math.floor((now / 1000) * 30);
+        slices.forEach((s, i) => {
+          const x = jitter(step, i + 1) * 60;
+          const y = jitter(step, i + 5) * 12;
+          const sc = 1 + jitter(step, i + 9) * 0.06;
+          s.style.transform = `translate(${x}px, ${y}px) scaleX(${sc})`;
+        });
+        requestAnimationFrame(frame);
+      }
+      requestAnimationFrame(frame);
+    }
+
+    function play() {
+      if (playing) return; // one stinger at a time; rapid cuts share it
+      playing = true;
+      if (style === "glitch") {
+        playGlitch(420);
+        return;
+      }
+      if (style === "fade") fadeEl.classList.add("on");
+      document.body.classList.add("play");
+      setTimeout(() => {
+        document.body.classList.remove("play");
+        fadeEl.classList.remove("on");
+        playing = false;
+      }, 620);
+    }
+
+    Bus.on("scene_switch", play);
+  </script>
+</body>
+</html>

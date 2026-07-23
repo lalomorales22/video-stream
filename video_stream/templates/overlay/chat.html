@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>video-stream · chat overlay</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      width: 100vw;
+      height: 100vh;
+      background: transparent;
+      overflow: hidden;
+      font-family: -apple-system, Inter, "Segoe UI", sans-serif;
+    }
+    #feed {
+      position: fixed;
+      left: 22px;
+      right: 20px;
+      bottom: 16px;
+      max-width: 460px;
+      display: flex;
+      flex-direction: column;
+      justify-content: flex-end;
+      overflow: hidden;
+      max-height: calc(100vh - 32px);
+      mask-image: linear-gradient(to bottom, transparent 0%, black 12%);
+      -webkit-mask-image: linear-gradient(to bottom, transparent 0%, black 12%);
+    }
+    .msg {
+      margin-top: 10px;
+      max-width: 440px;
+      opacity: 0;
+      transform: translateY(10px);
+      animation: msgIn 0.25s ease forwards;
+    }
+    @keyframes msgIn {
+      to { opacity: 1; transform: translateY(0); }
+    }
+    .msg .author {
+      font: 700 19px Inter, -apple-system, sans-serif;
+      text-shadow: 0 0 6px rgba(0, 0, 0, 0.9);
+    }
+    .msg .dot {
+      display: inline-block;
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+      margin-right: 8px;
+      vertical-align: middle;
+    }
+    .msg .line {
+      font: 400 20px Inter, -apple-system, sans-serif;
+      line-height: 26px;
+      color: #fff;
+      text-shadow: 0 0 6px rgba(0, 0, 0, 0.9);
+      overflow-wrap: break-word;
+    }
+  </style>
+</head>
+<body>
+  <div id="feed"></div>
+
+  <script src="/static/js/bus.js?v={{ asset_v }}"></script>
+  <script>
+    const feed = document.getElementById("feed");
+    const COLORS = { twitch: "#a970ff", kick: "#53fc18" };
+    const MAX_SHOWN = 14;
+
+    function addMessage(msg) {
+      if (!msg || typeof msg !== "object") return;
+      const el = document.createElement("div");
+      el.className = "msg";
+      const dot = document.createElement("span");
+      dot.className = "dot";
+      dot.style.background = COLORS[msg.platform] || "#4fd1c5";
+      const author = document.createElement("span");
+      author.className = "author";
+      author.style.color = msg.color || COLORS[msg.platform] || "#fff";
+      author.textContent = msg.author || "";
+      const head = document.createElement("div");
+      head.appendChild(dot);
+      head.appendChild(author);
+      const line = document.createElement("div");
+      line.className = "line";
+      line.textContent = msg.text || "";
+      el.appendChild(head);
+      el.appendChild(line);
+      feed.appendChild(el);
+      while (feed.children.length > MAX_SHOWN) feed.firstChild.remove();
+    }
+
+    // Live messages racing the history backfill would duplicate or reorder
+    // the feed — buffer them until the snapshot lands, then dedup by id.
+    let backlog = [];
+    Bus.on("chat_message", (m) => (backlog ? backlog.push(m) : addMessage(m)));
+    fetch("/api/chat/history")
+      .then((r) => r.json())
+      .then((d) => d.messages || [])
+      .catch(() => [])
+      .then((history) => {
+        const seen = new Set(history.map((m) => m && m.id));
+        history.slice(-MAX_SHOWN).forEach(addMessage);
+        backlog.filter((m) => !seen.has(m.id)).forEach(addMessage);
+        backlog = null; // live messages render directly from now on
+      });
+  </script>
+</body>
+</html>

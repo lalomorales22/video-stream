@@ -325,6 +325,7 @@
       if (!res.ok) throw new Error("status failed");
       state = await res.json();
       render();
+      renderOverlayChips();
     } catch (err) {
       console.error(err);
       cameraCount.textContent = "offline";
@@ -350,13 +351,18 @@
           directorState.active != null
             ? state.cameras.find((c) => c.index === directorState.active)
             : null;
-        const who = cam ? cam.name : directorState.active != null ? `cam ${directorState.active}` : "…";
+        const who = cam
+          ? cam.name
+          : directorState.active != null
+          ? `cam ${directorState.active}`
+          : directorState.active_rule || "…";
         const mode = directorState.dry_run
           ? "dry-run"
           : directorState.obs_connected
           ? "→ OBS"
           : "no OBS";
-        directorActive.textContent = `on air: ${who} · ${mode}`;
+        const why = directorState.last_decision ? ` · ${directorState.last_decision}` : "";
+        directorActive.textContent = `on air: ${who} · ${mode}${why}`;
       }
     }
   }
@@ -369,8 +375,10 @@
       directorState = {
         enabled: !!d.enabled,
         active: d.active ?? null,
+        active_rule: d.active_rule ?? null,
         dry_run: !!d.dry_run,
         obs_connected: !!d.obs_connected,
+        last_decision: d.last_decision ?? null,
       };
       renderDirector(); // updates on-air ring in place, no card rebuild
     } catch {
@@ -509,13 +517,437 @@
     }
   });
 
+  // ── View tabs: Streams | Avatar (avatar mounts lazily in an iframe;
+  //    hiding it throttles its rAF loop, so tracking pauses off-tab and
+  //    resumes with all state intact when you come back) ────────────────
+  const tabStreams = document.getElementById("tab-streams");
+  const tabAvatar = document.getElementById("tab-avatar");
+  const viewStreams = document.getElementById("view-streams");
+  const viewAvatar = document.getElementById("view-avatar");
+  const avatarFrame = document.getElementById("avatar-frame");
+
+  function showView(which) {
+    const avatar = which === "avatar";
+    if (avatar && avatarFrame && !avatarFrame.getAttribute("src")) {
+      avatarFrame.src = "/avatar"; // first open only — dashboard stays light
+    }
+    viewStreams?.classList.toggle("hidden", avatar);
+    viewAvatar?.classList.toggle("hidden", !avatar);
+    tabStreams?.classList.toggle("on", !avatar);
+    tabStreams?.setAttribute("aria-selected", String(!avatar));
+    tabAvatar?.classList.toggle("on", avatar);
+    tabAvatar?.setAttribute("aria-selected", String(avatar));
+  }
+
+  tabStreams?.addEventListener("click", () => showView("streams"));
+  tabAvatar?.addEventListener("click", () => showView("avatar"));
+
+  // ── Live captions: Web Speech in THIS tab → subtitles overlay ───────
+  const btnSttStart = document.getElementById("btn-stt-start");
+  const btnSttStop = document.getElementById("btn-stt-stop");
+  const sttStatus = document.getElementById("stt-status");
+  const subtitleInput = document.getElementById("subtitle-text");
+  let sttRecognition = null;
+  let sttActive = false;
+  let sttDenied = false;
+  let interimTimer = null;
+  let pendingInterim = null;
+
+  function pushSubtitle(text, final) {
+    return fetch("/api/subtitles/push", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text, final }),
+    }).catch(() => {});
+  }
+
+  function sttUi(listening) {
+    btnSttStart?.classList.toggle("hidden", listening);
+    btnSttStop?.classList.toggle("hidden", !listening);
+    if (sttStatus) sttStatus.textContent = listening ? "🔴 listening" : "";
+  }
+
+  function startSTT() {
+    if (sttActive) return;
+    sttDenied = false;
+    const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!Recognition) {
+      toast("Speech recognition needs Chrome (and localhost or HTTPS)", false);
+      return;
+    }
+    sttRecognition = new Recognition();
+    sttRecognition.continuous = true;
+    sttRecognition.interimResults = true;
+    sttRecognition.lang = "en-US";
+    sttRecognition.onstart = () => {
+      sttActive = true;
+      sttUi(true);
+    };
+    sttRecognition.onend = () => {
+      if (sttActive) {
+        // Chrome ends recognition after silence — restart quietly (small
+        // delay so error loops can't spin hot).
+        setTimeout(() => {
+          if (sttActive) {
+            try { sttRecognition.start(); } catch {}
+          }
+        }, 300);
+        return;
+      }
+      sttUi(false);
+      // The trailing onend after a not-allowed error must not eat the message.
+      if (sttDenied && sttStatus) sttStatus.textContent = "mic denied";
+    };
+    sttRecognition.onerror = (e) => {
+      if (e.error === "not-allowed") {
+        sttDenied = true;
+        sttActive = false;
+        sttUi(false);
+        if (sttStatus) sttStatus.textContent = "mic denied";
+      }
+      // Everything else (no-speech, network, aborted) rides the onend restart.
+    };
+    sttRecognition.onresult = (event) => {
+      if (!sttActive) return; // stopped — never caption after the clear
+      let interimText = "";
+      let finalText = "";
+      for (let i = event.resultIndex; i < event.results.length; i++) {
+        const transcript = event.results[i][0].transcript.trim();
+        if (!transcript) continue;
+        if (event.results[i].isFinal) finalText += (finalText ? " " : "") + transcript;
+        else interimText = transcript; // overwrite — last interim wins
+      }
+      if (finalText) {
+        clearTimeout(interimTimer);
+        pendingInterim = null;
+        pushSubtitle(finalText, true);
+      } else if (interimText) {
+        // Trailing-edge ~200ms throttle: Chrome fires several results/sec.
+        pendingInterim = interimText;
+        if (!interimTimer) {
+          interimTimer = setTimeout(() => {
+            interimTimer = null;
+            if (pendingInterim) pushSubtitle(pendingInterim, false);
+            pendingInterim = null;
+          }, 200);
+        }
+      }
+    };
+    try {
+      sttRecognition.start();
+    } catch {
+      toast("Could not start the microphone", false);
+    }
+  }
+
+  function stopSTT() {
+    sttActive = false; // FIRST — so the trailing onend doesn't restart
+    clearTimeout(interimTimer); // a queued interim must not caption after the clear
+    interimTimer = null;
+    pendingInterim = null;
+    try { sttRecognition?.stop(); } catch {}
+    sttUi(false);
+    fetch("/api/subtitles/clear", { method: "POST" }).catch(() => {});
+  }
+
+  btnSttStart?.addEventListener("click", startSTT);
+  btnSttStop?.addEventListener("click", stopSTT);
+  document.getElementById("btn-subtitle-push")?.addEventListener("click", () => {
+    const text = subtitleInput?.value.trim();
+    if (!text) return;
+    pushSubtitle(text, true);
+    subtitleInput.value = "";
+  });
+  subtitleInput?.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") document.getElementById("btn-subtitle-push")?.click();
+  });
+
+  // ── Overlay URL chips + test alert ──────────────────────────────────
+  const overlayChips = document.getElementById("overlay-chips");
+  function renderOverlayChips() {
+    if (!overlayChips) return;
+    const base =
+      (state.bases || []).find((b) => b.ip && b.ip !== "127.0.0.1")?.base ||
+      (state.bases || [])[0]?.base ||
+      "";
+    overlayChips.innerHTML = "";
+    ["subtitles", "alerts", "hud", "stinger", "chat"].forEach((name) => {
+      const chip = document.createElement("span");
+      chip.className = "overlay-chip";
+      chip.textContent = name;
+      chip.title = `Copy OBS browser-source URL: ${base}/overlay/${name}`;
+      chip.addEventListener("click", async () => {
+        const ok = await copyText(`${base}/overlay/${name}`);
+        toast(ok ? `${name} overlay URL copied` : "Could not copy", ok);
+      });
+      overlayChips.appendChild(chip);
+    });
+  }
+
+  document.getElementById("btn-alert-test")?.addEventListener("click", async () => {
+    const types = ["follow", "sub", "raid", "bits", "donation"];
+    const type = types[Math.floor(Math.random() * types.length)];
+    const res = await fetch("/api/alerts/test", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ type, amount: type === "bits" ? 500 : type === "donation" ? "$5.00" : null }),
+    }).catch(() => null);
+    toast(res && res.ok ? `Test ${type} alert sent` : "Alert failed", !!(res && res.ok));
+  });
+
+  // ── Unified chat: connect Twitch/Kick, show live status ─────────────
+  const chatTwitch = document.getElementById("chat-twitch");
+  const chatKick = document.getElementById("chat-kick");
+  const chatStatusEl = document.getElementById("chat-status");
+  const chatState = { twitch: null, kick: null };
+
+  function renderChatStatus() {
+    if (!chatStatusEl) return;
+    const parts = [];
+    ["twitch", "kick"].forEach((p) => {
+      const s = chatState[p];
+      if (s && s.status !== "off") {
+        parts.push(`${p}: ${s.status}${s.detail ? ` (${s.detail})` : ""}`);
+      }
+    });
+    chatStatusEl.textContent = parts.join(" · ");
+  }
+
+  ["twitch", "kick"].forEach((p) => {
+    Bus.on(`chat_status_${p}`, (s) => {
+      chatState[p] = s;
+      // Retained status is the only memory of the channel after a reload —
+      // refill a blank input so Connect's "empty field = disconnect" rule
+      // can't silently drop a platform the operator never typed this session.
+      const input = p === "twitch" ? chatTwitch : chatKick;
+      if (input && s.status !== "off" && s.channel && !input.value.trim() && document.activeElement !== input) {
+        input.value = s.channel;
+      }
+      renderChatStatus();
+    });
+  });
+
+  document.getElementById("btn-chat-connect")?.addEventListener("click", async () => {
+    const wanted = { twitch: chatTwitch?.value.trim(), kick: chatKick?.value.trim() };
+    let acted = false;
+    let failed = false;
+    for (const platform of ["twitch", "kick"]) {
+      try {
+        if (wanted[platform]) {
+          const res = await fetch("/api/chat/connect", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ platform, channel: wanted[platform] }),
+          });
+          if (!res.ok) {
+            const body = await res.json().catch(() => ({}));
+            throw new Error(body.detail || `${platform} connect failed`);
+          }
+          acted = true;
+        } else if (chatState[platform] && chatState[platform].status !== "off") {
+          await fetch("/api/chat/disconnect", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ platform }),
+          });
+          acted = true;
+        }
+      } catch (err) {
+        failed = true;
+        toast(err.message || `${platform} connect failed`, false);
+      }
+    }
+    if (acted && !failed) {
+      toast("Chat updated — drop the chat overlay into OBS to show it on stream");
+    }
+  });
+
+  // ── Setup panel: scan · propose · verify · settings ─────────────────
+  const btnSetup = document.getElementById("btn-setup");
+  const setupPanel = document.getElementById("setup-panel");
+  const setupChecklist = document.getElementById("setup-checklist");
+  const setupProposal = document.getElementById("setup-proposal");
+  const setupSettings = document.getElementById("setup-settings");
+  // A form whose only field is a lone text/password input implicit-submits on
+  // Enter (full page reload) — the setup form must never navigate.
+  setupSettings?.addEventListener("submit", (e) => e.preventDefault());
+  let settingsLoaded = false;
+
+  function authHeaders() {
+    const token = localStorage.getItem("vs-token");
+    const headers = { "Content-Type": "application/json" };
+    if (token) headers["X-Auth-Token"] = token;
+    return headers;
+  }
+
+  btnSetup?.addEventListener("click", () => {
+    const open = setupPanel.classList.toggle("hidden") === false;
+    btnSetup.setAttribute("aria-pressed", open ? "true" : "false");
+    btnSetup.classList.toggle("on", open);
+    if (open && !settingsLoaded) loadSettings();
+  });
+
+  async function loadSettings() {
+    try {
+      const res = await fetch("/api/settings", { headers: authHeaders() });
+      if (res.status === 401) {
+        renderTokenPrompt();
+        return;
+      }
+      if (!res.ok) throw new Error("Could not load settings");
+      const data = await res.json();
+      renderSettingsForm(data.fields);
+      settingsLoaded = true;
+    } catch (err) {
+      toast(err.message || "Settings unavailable", false);
+    }
+  }
+
+  function renderTokenPrompt() {
+    setupSettings.innerHTML = `
+      <div class="settings-row">
+        <label for="vs-token-input">Auth token</label>
+        <input type="password" id="vs-token-input" placeholder="X-Auth-Token" />
+        <button type="button" class="btn btn-sm" id="vs-token-save">Unlock</button>
+      </div>`;
+    document.getElementById("vs-token-save").addEventListener("click", () => {
+      localStorage.setItem(
+        "vs-token",
+        document.getElementById("vs-token-input").value.trim()
+      );
+      loadSettings();
+    });
+    document.getElementById("vs-token-input").addEventListener("keydown", (e) => {
+      if (e.key === "Enter") document.getElementById("vs-token-save").click();
+    });
+  }
+
+  function renderSettingsForm(fields) {
+    setupSettings.innerHTML = "";
+    fields.forEach((f) => {
+      const row = document.createElement("div");
+      row.className = "settings-row";
+      const id = `set-${f.key}`;
+      const input =
+        f.kind === "bool"
+          ? `<input type="checkbox" id="${id}" data-key="${f.key}" data-kind="bool" ${f.value ? "checked" : ""} />`
+          : `<input type="${f.secret ? "password" : "text"}" id="${id}" data-key="${f.key}" data-kind="${f.kind}"
+               value="${esc(String(f.value ?? ""))}" placeholder="${esc(String(f.default ?? ""))}" />`;
+      row.innerHTML = `<label for="${id}" title="${esc(f.help)}">${esc(f.key)}</label>${input}`;
+      setupSettings.appendChild(row);
+    });
+    const actions = document.createElement("div");
+    actions.className = "settings-row settings-save";
+    actions.innerHTML = `<span class="muted mono">changes apply live · director restarts if running</span>
+      <button type="button" class="btn btn-sm btn-signal" id="btn-save-settings">Save settings</button>`;
+    setupSettings.appendChild(actions);
+    document.getElementById("btn-save-settings").addEventListener("click", saveSettings);
+  }
+
+  async function saveSettings() {
+    const updates = {};
+    for (const el of setupSettings.querySelectorAll("input[data-key]")) {
+      const kind = el.getAttribute("data-kind");
+      const key = el.getAttribute("data-key");
+      let value = kind === "bool" ? el.checked : el.value;
+      if (kind === "int" || kind === "float") {
+        // Cleared field = "use the default" — that's what the placeholder shows.
+        const raw = el.value.trim() === "" ? el.placeholder : el.value;
+        value = kind === "int" ? parseInt(raw, 10) : parseFloat(raw);
+        if (Number.isNaN(value)) {
+          toast(`${key}: not a number`, false);
+          return;
+        }
+      }
+      updates[key] = value;
+    }
+    try {
+      const res = await fetch("/api/settings", {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify(updates),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (res.status === 401) {
+        renderTokenPrompt();
+        throw new Error("Auth token required");
+      }
+      if (!res.ok) throw new Error(body.detail || "Save failed");
+      renderSettingsForm(body.fields);
+      toast("Settings saved");
+    } catch (err) {
+      toast(err.message || "Save failed", false);
+    }
+  }
+
+  document.getElementById("btn-verify")?.addEventListener("click", async () => {
+    setupChecklist.innerHTML = `<div class="muted mono">checking the rig…</div>`;
+    try {
+      const res = await fetch("/api/setup/verify");
+      if (!res.ok) throw new Error("Verify failed");
+      const data = await res.json();
+      setupChecklist.innerHTML = "";
+      data.checks.forEach((c) => {
+        const row = document.createElement("div");
+        row.className = `check-row ${c.ok ? "ok" : "bad"}`;
+        row.innerHTML = `<span class="check-mark">${c.ok ? "✓" : "✗"}</span>
+          <span class="check-name">${esc(c.name)}</span>
+          <span class="check-details mono">${esc(c.details)}</span>`;
+        setupChecklist.appendChild(row);
+      });
+      toast(`Rig check: ${data.passed}/${data.total} passed`, data.passed === data.total);
+    } catch (err) {
+      setupChecklist.innerHTML = "";
+      toast(err.message || "Verify failed", false);
+    }
+  });
+
+  document.getElementById("btn-generate")?.addEventListener("click", async () => {
+    try {
+      const res = await fetch("/api/setup/generate", { method: "POST" });
+      if (!res.ok) throw new Error("Generate failed");
+      const data = await res.json();
+      setupProposal.classList.remove("hidden");
+      const pairs = Object.entries(data.proposal);
+      if (!pairs.length) {
+        setupProposal.innerHTML = `<div class="muted mono">${
+          data.obs_reachable
+            ? "No matching scenes found — name OBS scenes like “Cam 0”, “Cam 1”…"
+            : "OBS unreachable — start OBS and enable its WebSocket server first"
+        }</div>`;
+        return;
+      }
+      setupProposal.innerHTML = `
+        <span class="eyebrow">Proposed scene map</span>
+        <code class="mono">${esc(data.scene_map_string)}</code>
+        <button type="button" class="btn btn-sm btn-signal" id="btn-apply-map">Apply</button>`;
+      document.getElementById("btn-apply-map").addEventListener("click", async () => {
+        const res2 = await fetch("/api/settings", {
+          method: "POST",
+          headers: authHeaders(),
+          body: JSON.stringify({ obs_scene_map: data.scene_map_string }),
+        });
+        if (res2.status === 401) {
+          renderTokenPrompt();
+          toast("Auth token required", false);
+          return;
+        }
+        toast(res2.ok ? "Scene map applied" : "Apply failed", res2.ok);
+      });
+    } catch (err) {
+      toast(err.message || "Generate failed", false);
+    }
+  });
+
   // ── Studio Bus: live push replaces polling while connected ──────────
   Bus.on("director", (d) => {
     directorState = {
       enabled: !!d.enabled,
       active: d.active ?? null,
+      active_rule: d.active_rule ?? null,
       dry_run: !!d.dry_run,
       obs_connected: !!d.obs_connected,
+      last_decision: d.last_decision ?? null,
     };
     renderDirector();
   });

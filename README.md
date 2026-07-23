@@ -45,6 +45,17 @@ Broadcast every local camera over Wi‑Fi. Each stream gets a shareable URL you 
 - [**Smart Zoom**](#smart-zoom-punch-ins) — double-click any preview to punch in 2× on that spot, baked
   into the stream server-side so OBS sees it with zero setup; `--director-auto-punch` lets the director
   tighten on the tracked face after each cut
+- [**Hybrid director rules**](#hybrid-director-rules-audio--motion) — "cut to whoever is *talking*":
+  mix `audio:<OBS input>` (live dBFS meters) and `motion:<camera>` rules with priorities, hysteresis,
+  and a human-readable `last_decision` explaining every cut
+- [**Overlay pack**](#overlay-pack-captions--hud--alerts--stinger) — free live captions (speech
+  recognition in your Chrome tab), a rig HUD, animated alerts, and a stinger that fires on every
+  director cut — all transparent OBS browser sources with copyable URLs
+- [**Unified chat**](#unified-live-chat-twitch--kick) — Twitch (zero credentials) + Kick chat merged
+  server-side, with an on-stream chat overlay
+- [**Setup wizard & settings**](#setup-wizard--runtime-settings) — scan → propose a scene map → verify
+  the rig with a pass/fail checklist; edit everything from the dashboard (secrets masked, optional
+  shared-token auth)
 
 ## Install
 
@@ -355,11 +366,77 @@ With `--director-auto-punch`, the auto-director punches in ~1.6× after each cut
 aimed at the tracked face when the skeleton overlay is on (center-frame otherwise) —
 then eases back out before the next cut is allowed.
 
+### Hybrid director rules (audio + motion)
+
+Motion-only direction cuts to a waving hand while the speaker sits still. With a rules
+file, the director also listens: `audio:<OBS input>` rules use **live loudness meters**
+(a dedicated OBS WebSocket connection subscribed to `InputVolumeMeters` — the only way
+to get real levels; the input fader is not loudness), and `motion:<camera>` rules use
+this rig's motion scores. Copy `presets/director-rules.example.json`, adjust, then:
+
+```bash
+video-stream --director --director-rules my-rules.json
+```
+
+Rules never mix units: audio thresholds are dBFS (−90…0, e.g. `-55` for "speaking"),
+motion thresholds are 0–1. Higher `priority` wins ties; a challenger must beat the
+active audio rule by `hysteresis_db` (default 3) to steal the scene, must stay on top
+for its `hold`, and cuts respect the global `cooldown`. The dashboard (and `GET
+/api/director`) shows `last_decision` — `pending:mic_cam`, `hysteresis-hold:…`,
+`switch:Camera` — so the director is never a black box. Audio input names match
+case-insensitively.
+
+## Overlay pack (captions · HUD · alerts · stinger)
+
+Five transparent **OBS Browser Source** pages, all pushed live over the Studio Bus
+(no CDNs — they work on an offline rig). The dashboard's *Overlays* chips copy each
+URL with your LAN address:
+
+| Overlay | URL | What it shows |
+|---|---|---|
+| Captions | `/overlay/subtitles` | Live subtitle line (settings: font/size/colors via `/api/subtitles/settings`) |
+| Alerts | `/overlay/alerts` | Animated alert cards with particle bursts (test from the dashboard) |
+| Rig HUD | `/overlay/hud` | Per-camera LIVE/OFF, on-air + director reasoning, safety budget, replay/cut toasts |
+| Stinger | `/overlay/stinger` | Plays a swipe on every director cut (`?style=glitch` or `?style=fade` for variants) |
+| Chat | `/overlay/chat` | The merged Twitch+Kick feed, bottom-anchored |
+
+**Live captions are free**: click *🎤 Start* in the dashboard's Captions bar — speech
+recognition runs in that Chrome tab (needs `localhost` or HTTPS + mic permission) and
+the server just relays text to the overlay. There's also a type-a-line box for manual
+lower-thirds.
+
+## Unified live chat (Twitch + Kick)
+
+Enter a channel name in the Chat bar and hit Connect. **Twitch needs zero
+credentials** (anonymous read-only IRC); Kick uses its public chat socket (if the
+name lookup is blocked, paste the numeric chatroom id instead). Messages merge
+server-side — every dashboard and the `/overlay/chat` browser source see the same
+feed, and `GET /api/chat/history` backfills late joiners.
+
+## Setup wizard & runtime settings
+
+Click **Setup** in the topbar:
+
+- **Verify rig** — pass/fail checklist: cameras streaming, OBS reachable, scene map
+  covers live cameras, mapped scenes exist, replay buffer enabled, MediaPipe present.
+  Run it *before* going live, not during.
+- **Propose scene map** — scans your OBS scenes and matches them to cameras
+  (`"Cam 0"`-style names match first, then device-name words); review and apply with
+  one click.
+- **Settings** — every important flag, editable live: OBS connection, director tuning,
+  replay sources, safety caps. Saved to `~/.config/video-stream/settings.json`
+  (`chmod 600`; secrets are write-only and never echoed back). Explicit CLI flags
+  still win at boot. Set `auth_token` to require an `X-Auth-Token` header for future
+  settings changes.
+
 ## Avatar (VTuber, beta)
 
 Drive a rigged **3D avatar** with your face in real time — head turns, blinks, brows,
 and mouth/visemes — rendered on a transparent canvas you drop straight into OBS as a
-**Browser Source**. Everything runs client-side in the browser (MediaPipe face tracking
+**Browser Source**. The studio lives **inside the dashboard** as the *Avatar* tab
+(switching away pauses its rendering; switching back resumes exactly where you left
+off), and the ↗ button pops it into its own browser tab for a second monitor. The
+standalone `/avatar` URL is what OBS consumes — that never changes. Everything runs client-side in the browser (MediaPipe face tracking
 → [Kalidokit](https://github.com/yeemachine/kalidokit) retargeting →
 [three-vrm](https://github.com/pixiv/three-vrm)); the server just serves the page. See
 [`path_b.md`](path_b.md) for the full design.

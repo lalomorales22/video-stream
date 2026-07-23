@@ -28,12 +28,17 @@ from pydantic import BaseModel
 
 from video_stream import __version__
 from video_stream.camera import CameraManager
-from video_stream.director import Director, DirectorConfig
+from video_stream.director import Director, DirectorConfig, load_rules_file
 from video_stream.hub import hub
-from video_stream.obs import OBSClient
+from video_stream.obs import AudioMeterListener, OBSClient
 from video_stream.network import get_local_ips, primary_ip
 from video_stream.replay import ReplayConfig, ReplayDirector, ReplayError
 from video_stream.safety import SafetyBlocked, SafetyManager
+from video_stream import chat as chat_mod
+from video_stream import overlays
+from video_stream import settings as settings_mod
+from video_stream import setup_wizard
+from video_stream.settings import settings
 
 ROOT = Path(__file__).resolve().parent
 STATIC_DIR = ROOT / "static"
@@ -70,7 +75,10 @@ def _save_presets(items: list[dict[str, Any]]) -> None:
 
 manager = CameraManager()
 director: Director | None = None
-_director_lock = threading.Lock()  # serializes start/stop across threadpool workers
+# Reentrant so the settings bounce can hold it across stop+start while those
+# helpers take it again; serializes the lifecycle across threadpool workers.
+_director_lock = threading.RLock()
+_shutting_down = threading.Event()  # teardown seal: nothing may (re)start past it
 safety = SafetyManager(on_change=lambda status: hub.emit("safety", status))
 replay: ReplayDirector | None = None
 config: dict[str, Any] = {
@@ -96,6 +104,9 @@ config: dict[str, Any] = {
     "replay_media_source": "",
     "replay_lower_third": "",
     "replay_lower_third_scene": "",
+    "safety_fallback_scene": "",
+    "safety_max_actions": 40,
+    "director_rules": "",
 }
 
 
@@ -103,6 +114,15 @@ config: dict[str, Any] = {
 async def lifespan(_app: FastAPI):
     # The Studio Bus needs the server loop so threads can emit safely.
     hub.set_loop(asyncio.get_running_loop())
+    # Under --reload, uvicorn serves from a spawned subprocess that re-imports
+    # this module fresh — main() (and its settings.load()) never ran there, so
+    # the auth gate would be open and a dashboard Save would rewrite
+    # settings.json from an empty dict. Hydrate saved settings here; no-op in
+    # a normal boot where main() already loaded them.
+    if not settings.loaded:
+        saved = settings.load()
+        if saved:
+            _apply_settings(dict(saved))
     manager.width = config["width"]
     manager.height = config["height"]
     manager.jpeg_quality = config["quality"]
@@ -128,10 +148,18 @@ async def lifespan(_app: FastAPI):
 
     yield
 
-    if replay is not None:
-        replay.shutdown()
-    stop_director()
-    manager.stop_all()
+    def _teardown() -> None:
+        _shutting_down.set()  # startup/rescan threads must not (re)start anything
+        chat_mod.chat.shutdown()
+        if replay is not None:
+            replay.shutdown()
+        stop_director()
+        manager.shutdown()
+
+    # Teardown joins threads and closes OBS sockets — seconds of blocking when
+    # OBS or a camera is wedged. Keep it off the event loop so shutdown (and a
+    # second Ctrl-C) stays responsive.
+    await asyncio.to_thread(_teardown)
 
 
 def start_director() -> None:
@@ -143,12 +171,23 @@ def start_director() -> None:
     """
     global director
     with _director_lock:
-        if director is not None:
+        if director is not None or _shutting_down.is_set():
             return
         manager.set_motion_all(True)
+        rules, overrides = [], {}
+        if config["director_rules"]:
+            rules, overrides = load_rules_file(config["director_rules"])
         obs = None
         if not config["director_dry_run"]:
             obs = OBSClient(
+                host=config["obs_host"],
+                port=config["obs_port"],
+                password=config["obs_password"],
+            )
+        audio = None
+        if any(r.kind == "audio" for r in rules):
+            # Live loudness is event-only; it gets its own OBS connection.
+            audio = AudioMeterListener(
                 host=config["obs_host"],
                 port=config["obs_port"],
                 password=config["obs_password"],
@@ -159,22 +198,26 @@ def start_director() -> None:
             config=DirectorConfig(
                 scene_map=config["obs_scene_map"],
                 min_score=config["director_min_score"],
-                hold=config["director_hold"],
-                cooldown=config["director_cooldown"],
+                hold=overrides.get("hold", config["director_hold"]),
+                cooldown=overrides.get("cooldown", config["director_cooldown"]),
+                hysteresis_db=overrides.get("hysteresis_db", 3.0),
                 dry_run=config["director_dry_run"],
+                rules=rules,
             ),
             safety=safety,
             on_switch=_director_switched,
+            audio=audio,
         )
         director.start()
 
 
-def _director_switched(cam_index: int, scene: str, entry: dict) -> None:
+def _director_switched(cam_index: int | None, scene: str, entry: dict) -> None:
     """Runs on the director thread after every committed cut."""
-    if config["director_auto_punch"]:
+    if config["director_auto_punch"] and cam_index is not None:
         stream = manager.get(cam_index)
         if stream is not None and stream.active:
             stream.punch_in()
+    hub.emit("scene_switch", {"scene": scene, "camera": cam_index}, retain=False)
     d = director
     hub.emit(
         "director",
@@ -217,6 +260,62 @@ def get_replay() -> ReplayDirector:
     return replay
 
 
+# Settings that only bind when the director is constructed (OBS connection
+# params + engine tuning) — the only ones worth bouncing a live show for.
+_DIRECTOR_KEYS = frozenset(
+    {
+        "obs_host",
+        "obs_port",
+        "obs_password",
+        "obs_scene_map",
+        "director_hold",
+        "director_cooldown",
+        "director_min_score",
+    }
+)
+
+
+def _apply_settings(values: dict[str, Any]) -> None:
+    """Push saved/posted settings onto the live subsystems. Runs on the event
+    loop (settings POST) or at boot — director restart goes to a thread."""
+    incoming = {k: v for k, v in values.items() if k in config}
+    if "obs_scene_map" in values:
+        incoming["obs_scene_map"] = _parse_scene_map(values["obs_scene_map"])
+    director_dirty = any(
+        k in _DIRECTOR_KEYS and config[k] != v for k, v in incoming.items()
+    )
+    config.update(incoming)
+    safety.fallback_scene = config["safety_fallback_scene"] or None
+    safety.max_actions = max(1, int(config["safety_max_actions"]))
+    if replay is not None:
+        replay.cfg.media_input = config["replay_media_source"]
+        replay.cfg.lower_third_input = config["replay_lower_third"]
+        replay.cfg.lower_third_scene = config["replay_lower_third_scene"]
+    if director is not None and director_dirty:
+        # New OBS/tuning values only bind at construction — bounce it.
+        def _restart() -> None:
+            # Hold the lock across the check so a toggle-off that lands
+            # between the save and this thread can't be silently undone:
+            # either it ran first (director is None — honor it) or it runs
+            # after and stops the freshly built director.
+            with _director_lock:
+                if director is None:
+                    return
+                stop_director()
+                start_director()
+
+        threading.Thread(target=_restart, name="director-restart", daemon=True).start()
+
+
+def _live_setting(key: str) -> Any:
+    """Effective runtime value for the settings form (live config wins).
+    Touches only `config` — never settings.get(), which would deadlock on the
+    non-reentrant lock public() holds while calling this."""
+    if key == "obs_scene_map":  # stored as dict, edited as "0=Cam A,1=Cam B"
+        return ",".join(f"{i}={s}" for i, s in sorted(config["obs_scene_map"].items()))
+    return config.get(key, "")  # auth_token lives only in the settings store
+
+
 app = FastAPI(
     title="video-stream",
     description="Broadcast local cameras over Wi‑Fi for OBS and browsers",
@@ -226,6 +325,21 @@ app = FastAPI(
 
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
+
+settings_mod.init(apply=_apply_settings, live=_live_setting)
+setup_wizard.init(
+    manager=manager,
+    config=config,
+    settings=settings,
+    obs_factory=lambda: OBSClient(
+        host=config["obs_host"], port=config["obs_port"], password=config["obs_password"]
+    ),
+)
+overlays.init(templates=templates, asset_version=lambda: _asset_version())
+app.include_router(settings_mod.router)
+app.include_router(setup_wizard.router)
+app.include_router(overlays.router)
+app.include_router(chat_mod.router)
 
 
 @app.exception_handler(SafetyBlocked)
@@ -745,6 +859,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Motion score a camera must clear to be considered active (0–1)",
     )
     p.add_argument(
+        "--director-rules",
+        default="",
+        help="Path to a JSON rules file mixing motion and audio triggers "
+        "(see presets/director-rules.example.json)",
+    )
+    p.add_argument(
         "--director-auto-punch",
         action="store_true",
         help="After each director cut, punch in ~1.6x on the subject "
@@ -886,10 +1006,27 @@ def main(argv: list[str] | None = None) -> None:
             "replay_media_source": args.replay_media_source,
             "replay_lower_third": args.replay_lower_third,
             "replay_lower_third_scene": args.replay_lower_third_scene,
+            "safety_fallback_scene": args.safety_fallback_scene,
+            "safety_max_actions": args.safety_max_actions,
+            "director_rules": args.director_rules,
         }
     )
-    safety.fallback_scene = args.safety_fallback_scene or None
-    safety.max_actions = max(1, args.safety_max_actions)
+
+    # Saved settings fill in wherever the CLI flag was left at its default
+    # (explicit CLI beats settings.json beats defaults).
+    parser = build_parser()
+    saved = settings.load()
+    fills = {
+        key: value
+        for key, value in saved.items()
+        if hasattr(args, key) and getattr(args, key) == parser.get_default(key)
+    }
+    if fills:
+        _apply_settings(dict(fills))
+        print(f"  [settings] applied from {settings.path}: {', '.join(sorted(fills))}")
+
+    safety.fallback_scene = config["safety_fallback_scene"] or None
+    safety.max_actions = max(1, int(config["safety_max_actions"]))
 
     if args.pose:
         _preflight_pose(args.pose_model)

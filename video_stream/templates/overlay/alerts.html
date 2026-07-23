@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>video-stream · alerts overlay</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      width: 100vw;
+      height: 100vh;
+      background: transparent;
+      overflow: hidden;
+      font-family: -apple-system, Inter, "Segoe UI", sans-serif;
+      color: #fff;
+    }
+    #alert-container {
+      position: fixed;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      width: 600px;
+      text-align: center;
+      pointer-events: none;
+    }
+    .alert-box {
+      position: relative;
+      background: rgba(0, 0, 0, 0.85);
+      backdrop-filter: blur(20px);
+      -webkit-backdrop-filter: blur(20px);
+      border: 2px solid #38bdf8;
+      border-radius: 16px;
+      padding: 30px 40px;
+      opacity: 0;
+      transform: scale(0.5) translateY(30px);
+      animation: alertIn 0.6s cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
+      box-shadow:
+        0 0 30px rgba(56, 189, 248, 0.4),
+        0 0 60px rgba(56, 189, 248, 0.2),
+        inset 0 1px 0 rgba(255, 255, 255, 0.1);
+    }
+    .alert-box.exit { animation: alertOut 0.5s ease forwards; }
+    @keyframes alertIn {
+      0% { opacity: 0; transform: scale(0.5) translateY(30px); }
+      100% { opacity: 1; transform: scale(1) translateY(0); }
+    }
+    @keyframes alertOut {
+      0% { opacity: 1; transform: scale(1) translateY(0); }
+      100% { opacity: 0; transform: scale(0.8) translateY(-30px); }
+    }
+    .alert-icon { font-size: 48px; margin-bottom: 10px; animation: bounce 0.6s ease infinite alternate; }
+    @keyframes bounce { from { transform: translateY(0); } to { transform: translateY(-8px); } }
+    .alert-type {
+      font-size: 14px;
+      text-transform: uppercase;
+      letter-spacing: 4px;
+      color: #4fd1c5;
+      margin-bottom: 8px;
+    }
+    .alert-username {
+      font-size: 32px;
+      font-weight: 900;
+      margin-bottom: 6px;
+      text-shadow: 0 0 20px rgba(56, 189, 248, 0.5);
+    }
+    .alert-message { font-size: 16px; color: rgba(255, 255, 255, 0.7); }
+    .alert-amount { font-size: 22px; font-weight: 700; margin-top: 4px; }
+    .alert-box.sub { border-color: #ffcc00; }
+    .alert-box.sub .alert-type { color: #ffcc00; }
+    .alert-box.sub .alert-username { text-shadow: 0 0 30px rgba(255, 204, 0, 0.4); }
+    .alert-box.raid { border-color: #ff4444; }
+    .alert-box.raid .alert-type { color: #ff4444; }
+    .alert-box.raid .alert-username { text-shadow: 0 0 30px rgba(255, 68, 68, 0.4); }
+    .alert-box.bits { border-color: #00e5ff; }
+    .alert-box.bits .alert-type { color: #00e5ff; }
+    .alert-box.bits .alert-username { text-shadow: 0 0 30px rgba(0, 229, 255, 0.4); }
+    .alert-box.bits .alert-amount { color: #00e5ff; }
+    .alert-box.donation { border-color: #00e676; }
+    .alert-box.donation .alert-type { color: #00e676; }
+    .alert-box.donation .alert-username { text-shadow: 0 0 30px rgba(0, 230, 118, 0.4); }
+    .alert-box.donation .alert-amount { color: #00e676; }
+    .particle {
+      position: absolute;
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      pointer-events: none;
+      animation: particle 1s ease-out forwards;
+    }
+    @keyframes particle {
+      0% { opacity: 1; transform: translate(0, 0) scale(1); }
+      100% { opacity: 0; transform: translate(var(--tx), var(--ty)) scale(0); }
+    }
+  </style>
+</head>
+<body>
+  <div id="alert-container"></div>
+
+  <script src="/static/js/bus.js?v={{ asset_v }}"></script>
+  <script>
+    const container = document.getElementById("alert-container");
+    const TYPES = ["follow", "sub", "raid", "bits", "donation"];
+    const icons = { follow: "🤍", sub: "⭐", raid: "⚔️", bits: "💎", donation: "💚" };
+    const labels = {
+      follow: "New Follower",
+      sub: "New Subscriber",
+      raid: "Incoming Raid",
+      bits: "Bits Cheer",
+      donation: "Donation",
+    };
+    const palettes = {
+      follow: ["#38bdf8", "#7dd3fc", "#e2e8f0"],
+      sub: ["#ffcc00", "#ffe066", "#fff"],
+      raid: ["#ff4444", "#ff8888", "#ffcc00"],
+      bits: ["#00e5ff", "#64ffda", "#e0f7fa"],
+      donation: ["#00e676", "#69f0ae", "#e8f5e9"],
+    };
+
+    const alertQueue = [];
+    let isShowingAlert = false;
+
+    function escapeHtml(text) {
+      const d = document.createElement("div");
+      d.textContent = text;
+      return d.innerHTML;
+    }
+
+    function processQueue() {
+      if (isShowingAlert || alertQueue.length === 0) return;
+      isShowingAlert = true;
+      showAlert(alertQueue.shift());
+    }
+
+    function showAlert(data) {
+      const type = TYPES.includes(data.type) ? data.type : "follow"; // class-injection guard
+      const duration = data.duration || 5000;
+      const amountHtml = data.amount
+        ? `<div class="alert-amount">${escapeHtml(String(data.amount))} ${type === "bits" ? "bits" : ""}</div>`
+        : "";
+      const el = document.createElement("div");
+      el.className = `alert-box ${type}`;
+      el.innerHTML = `
+        <div class="alert-icon">${icons[type]}</div>
+        <div class="alert-type">${labels[type]}</div>
+        <div class="alert-username">${escapeHtml(data.username || "")}</div>
+        ${amountHtml}
+        <div class="alert-message">${escapeHtml(data.message || "")}</div>
+      `;
+      container.appendChild(el);
+      spawnParticles(el, type);
+      if (data.sound) {
+        const audio = new Audio(data.sound);
+        audio.volume = 0.5;
+        audio.play().catch(() => {});
+      }
+      setTimeout(() => {
+        el.classList.add("exit");
+        setTimeout(() => {
+          el.remove();
+          isShowingAlert = false;
+          processQueue();
+        }, 500); // must match alertOut duration
+      }, duration);
+    }
+
+    function spawnParticles(parent, type) {
+      const palette = palettes[type] || palettes.follow;
+      for (let i = 0; i < 12; i++) {
+        const p = document.createElement("div");
+        p.className = "particle";
+        const angle = (Math.PI * 2 * i) / 12;
+        const dist = 80 + Math.random() * 60;
+        p.style.setProperty("--tx", `${Math.cos(angle) * dist}px`);
+        p.style.setProperty("--ty", `${Math.sin(angle) * dist}px`);
+        p.style.background = palette[i % palette.length];
+        p.style.left = "50%";
+        p.style.top = "50%";
+        parent.appendChild(p);
+        setTimeout(() => p.remove(), 1000);
+      }
+    }
+
+    Bus.on("alert", (data) => {
+      if (!data || typeof data !== "object") return;
+      if (alertQueue.length >= 20) alertQueue.shift(); // cap: drop the oldest
+      alertQueue.push(data);
+      processQueue();
+    });
+  </script>
+</body>
+</html>

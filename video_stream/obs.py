@@ -16,7 +16,9 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import math
 import threading
+import time
 
 try:
     from websockets.sync.client import connect as _ws_connect
@@ -145,6 +147,19 @@ class OBSClient:
             self._request("SetCurrentProgramScene", {"sceneName": scene_name})
         )
 
+    def current_scene(self) -> str | None:
+        resp = self._request("GetCurrentProgramScene")
+        if not self._ok(resp):
+            return None
+        data = resp["responseData"]
+        return data.get("currentProgramSceneName") or data.get("sceneName")
+
+    def input_list(self) -> list[str]:
+        resp = self._request("GetInputList")
+        if not self._ok(resp):
+            return []
+        return [i["inputName"] for i in resp["responseData"].get("inputs", [])]
+
     # ── Replay buffer / sources (used by video_stream.replay) ─────────────
 
     def replay_buffer_active(self) -> bool | None:
@@ -224,3 +239,129 @@ class OBSClient:
     def close(self) -> None:
         with self._lock:
             self._drop()
+
+
+def mul_to_db(mul: object) -> float | None:
+    """Linear amplitude multiplier → dBFS. mul <= 0 is silence → None."""
+    if isinstance(mul, (int, float)) and math.isfinite(mul) and mul > 0:
+        return 20 * math.log10(mul)
+    return None
+
+
+def peak_db(input_levels_mul: list) -> float | None:
+    """Loudest channel's post-fader peak (index 1 of each [mag, peak, inputPeak]
+    triple) in dB; falls back to any numeric value for unexpected shapes."""
+    values = [ch[1] for ch in input_levels_mul if isinstance(ch, list) and len(ch) > 1]
+    if not values:
+        values = [v for ch in input_levels_mul if isinstance(ch, list) for v in ch]
+    dbs = [d for d in (mul_to_db(v) for v in values) if d is not None]
+    return max(dbs) if dbs else None
+
+
+class AudioMeterListener:
+    """Dedicated OBS connection subscribed ONLY to InputVolumeMeters events.
+
+    Live loudness is event-only in obs-websocket v5 — there is no request for
+    it (GetInputVolume returns the *fader*, which is why february11's audio
+    director never actually worked). This runs its own socket + reader thread
+    with eventSubscriptions=65536 so the request/response client (above, with
+    eventSubscriptions=0) stays clean, and keeps the latest per-input peak:
+    ``levels()`` → {normalized name: (name, dB, monotonic seen_at)}.
+
+    OBS emits meters ~every 50ms while audio flows; staleness is the reader's
+    problem (the director applies a freshness window), not ours.
+    """
+
+    def __init__(
+        self, host: str = "127.0.0.1", port: int = 4455, password: str = "", timeout: float = 3.0
+    ) -> None:
+        self.host = host
+        self.port = port
+        self.password = password
+        self.timeout = timeout
+        self._lock = threading.Lock()
+        self._levels: dict[str, tuple[str, float, float]] = {}
+        self._running = False
+        self._thread: threading.Thread | None = None
+        self._ws = None  # live meters socket; stop() closes it to unblock recv
+        self.connected = False
+        self.last_error: str | None = None
+
+    def start(self) -> None:
+        if self._running:
+            return
+        self._running = True
+        self._thread = threading.Thread(target=self._loop, name="obs-meters", daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._running = False
+        # The reader can be parked in ws.recv(timeout=30.0) during quiet
+        # audio; closing the socket makes recv raise immediately so a
+        # director bounce never leaves a zombie meters connection stacked
+        # against OBS for up to 30s.
+        ws = self._ws
+        if ws is not None:
+            try:
+                ws.close()
+            except Exception:
+                pass
+
+    def levels(self) -> dict[str, tuple[str, float, float]]:
+        with self._lock:
+            return dict(self._levels)
+
+    def _loop(self) -> None:
+        while self._running:
+            try:
+                self._listen_once()
+            except Exception as exc:
+                self.last_error = str(exc)
+            self._ws = None
+            self.connected = False
+            if self._running:
+                time.sleep(3.0)  # reconnect backoff
+
+    def _listen_once(self) -> None:
+        if _ws_connect is None:
+            raise RuntimeError("websockets library unavailable")
+        with _ws_connect(
+            f"ws://{self.host}:{self.port}",
+            open_timeout=self.timeout,
+            close_timeout=self.timeout,
+        ) as ws:
+            self._ws = ws
+            hello = json.loads(ws.recv(timeout=self.timeout))
+            identify = {"op": 1, "d": {"rpcVersion": 1, "eventSubscriptions": 65536}}
+            auth = hello.get("d", {}).get("authentication")
+            if auth:
+                identify["d"]["authentication"] = _auth_string(
+                    self.password, auth["salt"], auth["challenge"]
+                )
+            ws.send(json.dumps(identify))
+            identified = json.loads(ws.recv(timeout=self.timeout))
+            if identified.get("op") != 2:
+                raise RuntimeError(f"identify failed: {identified}")
+            self.connected = True
+            self.last_error = None
+
+            while self._running:
+                # Long timeout: with no audio flowing OBS sends nothing, and
+                # that must read as "quiet", not as a broken connection.
+                try:
+                    frame = json.loads(ws.recv(timeout=30.0))
+                except TimeoutError:
+                    continue
+                d = frame.get("d", {})
+                if frame.get("op") != 5 or d.get("eventType") != "InputVolumeMeters":
+                    continue
+                now = time.monotonic()
+                with self._lock:
+                    for entry in d.get("eventData", {}).get("inputs", []):
+                        name = str(entry.get("inputName") or "").strip()
+                        if not name:
+                            continue
+                        db = peak_db(entry.get("inputLevelsMul") or [])
+                        if db is None:
+                            continue  # silence: keep the last level, let it go stale
+                        self._levels[name.lower()] = (name, db, now)

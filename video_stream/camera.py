@@ -166,6 +166,8 @@ class CameraStream:
         self._motion = None  # MotionScorer, built on start()
         self.zoom = ZoomState()
         self._punch_timer: threading.Timer | None = None
+        self._punch_generation = 0  # bumped by every arm/cancel; stale ease-backs no-op
+        self._punch_lock = threading.Lock()
         self.stats = StreamStats()
 
         self._cap: cv2.VideoCapture | None = None
@@ -267,11 +269,23 @@ class CameraStream:
         """
         point = self.focus_point()
         point = self.zoom.to_frame_coords(*point) if point else (0.5, 0.5)
-        self.zoom.set_target(point[0], point[1], level)
-        self._cancel_punch_timer()
-        self._punch_timer = threading.Timer(duration, self.zoom.reset)
-        self._punch_timer.daemon = True
-        self._punch_timer.start()
+        # Generation-tagged like replay's lower-third hide: an ease-back armed
+        # here can never fire once a manual zoom (or newer punch) supersedes it.
+        with self._punch_lock:
+            self.zoom.set_target(point[0], point[1], level)
+            self._punch_generation += 1
+            generation = self._punch_generation
+            if self._punch_timer is not None:
+                self._punch_timer.cancel()
+            self._punch_timer = threading.Timer(duration, self._ease_back, args=(generation,))
+            self._punch_timer.daemon = True
+            self._punch_timer.start()
+
+    def _ease_back(self, generation: int) -> None:
+        with self._punch_lock:
+            if generation != self._punch_generation:
+                return  # superseded by a manual zoom or a newer punch
+            self.zoom.reset()
 
     def set_manual_zoom(self, nx: float, ny: float, level: float) -> None:
         """Operator zoom from the dashboard. Cancels any pending auto-punch
@@ -285,9 +299,11 @@ class CameraStream:
         self.zoom.set_target(fx, fy, level)
 
     def _cancel_punch_timer(self) -> None:
-        if self._punch_timer is not None:
-            self._punch_timer.cancel()
-            self._punch_timer = None
+        with self._punch_lock:
+            self._punch_generation += 1  # anything already armed is now stale
+            if self._punch_timer is not None:
+                self._punch_timer.cancel()
+                self._punch_timer = None
 
     def stop(self) -> None:
         self._running = False
@@ -533,12 +549,15 @@ class CameraManager:
         self.motion_enabled = motion_enabled
         self._streams: dict[int, CameraStream] = {}
         self._lock = threading.Lock()
+        self._closed = False
 
     def discover(self, auto_start: bool = True) -> list[CameraInfo]:
         candidates, exhaustive = _candidate_indices(self.max_probe)
         found: list[CameraInfo] = []
         misses = 0
         for index in candidates:
+            if self._closed:
+                break  # teardown ran mid-scan; don't reopen released devices
             # Skip re-probe of already-known streams
             with self._lock:
                 existing = self._streams.get(index)
@@ -615,6 +634,12 @@ class CameraManager:
             streams = list(self._streams.values())
         for stream in streams:
             stream.stop()
+
+    def shutdown(self) -> None:
+        """stop_all for process teardown: also cancels an in-flight discover
+        so a background scan can't reopen devices we just released."""
+        self._closed = True
+        self.stop_all()
 
     def set_motion_all(self, enabled: bool) -> None:
         """Enable/disable motion scoring on every stream (for the director)."""

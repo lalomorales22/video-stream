@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>video-stream · rig HUD overlay</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      width: 100vw;
+      height: 100vh;
+      background: transparent;
+      overflow: hidden;
+      font-family: -apple-system, Inter, "Segoe UI", sans-serif;
+      color: #fff;
+    }
+    #top-bar {
+      position: absolute;
+      top: 0; left: 0; right: 0;
+      height: 48px;
+      background: linear-gradient(180deg, rgba(0, 0, 0, 0.85) 0%, rgba(0, 0, 0, 0.4) 80%, transparent 100%);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 24px;
+      z-index: 10;
+    }
+    #rig-name {
+      font-size: 15px;
+      font-weight: 900;
+      letter-spacing: 1px;
+      background: linear-gradient(135deg, #ff3d6e, #4fd1c5);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+    #stats-row { display: flex; align-items: center; gap: 24px; }
+    .stat { display: flex; align-items: center; gap: 6px; font-size: 13px; color: rgba(255, 255, 255, 0.8); }
+    .stat-val {
+      font-weight: 900;
+      color: #e2e8f0;
+      font-size: 15px;
+      min-width: 16px;
+      font-variant-numeric: tabular-nums;
+    }
+    .stat-val.pulse { animation: valPulse 0.4s ease; }
+    @keyframes valPulse {
+      0% { transform: scale(1); }
+      50% { transform: scale(1.4); color: #fff; }
+      100% { transform: scale(1); }
+    }
+    .stat-divider { width: 1px; height: 18px; background: rgba(255, 255, 255, 0.15); }
+    .badge {
+      display: inline-block;
+      font-size: 9px;
+      padding: 1px 5px;
+      border-radius: 3px;
+      font-weight: 700;
+      vertical-align: middle;
+      letter-spacing: 0.5px;
+    }
+    .badge.live { background: #e91916; color: #fff; }
+    .badge.off { background: rgba(255, 255, 255, 0.15); color: rgba(255, 255, 255, 0.5); }
+    .badge.killed { background: #ff4444; color: #fff; animation: killPulse 1.5s ease infinite; }
+    @keyframes killPulse {
+      0%, 100% { box-shadow: 0 0 0 0 rgba(255, 68, 68, 0.6); }
+      50% { box-shadow: 0 0 0 6px rgba(255, 68, 68, 0); }
+    }
+    .live-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #e91916;
+      animation: livePulse 1.5s ease infinite;
+      display: inline-block;
+    }
+    @keyframes livePulse {
+      0%, 100% { opacity: 1; box-shadow: 0 0 0 0 rgba(233, 25, 22, 0.6); }
+      50% { opacity: 0.8; box-shadow: 0 0 0 6px rgba(233, 25, 22, 0); }
+    }
+    #director-panel {
+      position: absolute;
+      bottom: 52px;
+      left: 20px;
+      background: rgba(0, 0, 0, 0.6);
+      backdrop-filter: blur(8px);
+      -webkit-backdrop-filter: blur(8px);
+      border-radius: 8px;
+      padding: 8px 16px;
+      font-size: 13px;
+      color: rgba(255, 255, 255, 0.7);
+      border-left: 3px solid #4fd1c5;
+      opacity: 0;
+      transition: opacity 0.3s ease, border-color 0.3s ease;
+      max-width: 480px;
+    }
+    #director-panel.visible { opacity: 1; }
+    #director-panel.on-air { border-left-color: #00e676; }
+    #director-panel .event-label {
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: 2px;
+      color: #4fd1c5;
+      margin-bottom: 2px;
+    }
+    #director-panel.on-air .event-label { color: #00e676; }
+    #toast-panel {
+      position: absolute;
+      right: 20px;
+      bottom: 52px;
+      width: 380px;
+      max-height: 300px;
+      display: flex;
+      flex-direction: column;
+      justify-content: flex-end;
+      overflow: hidden;
+      mask-image: linear-gradient(to bottom, transparent 0%, black 15%);
+      -webkit-mask-image: linear-gradient(to bottom, transparent 0%, black 15%);
+    }
+    .toast-card {
+      background: rgba(0, 0, 0, 0.55);
+      backdrop-filter: blur(8px);
+      -webkit-backdrop-filter: blur(8px);
+      border-radius: 8px;
+      padding: 7px 12px;
+      margin-top: 4px;
+      border-left: 3px solid var(--accent, #4fd1c5);
+      opacity: 0;
+      transform: translateX(20px);
+      animation: toastIn 0.3s ease forwards;
+      word-wrap: break-word;
+      font-size: 13px;
+    }
+    .toast-card .toast-label {
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: 2px;
+      color: var(--accent, #4fd1c5);
+      margin-bottom: 2px;
+    }
+    .toast-card.exit { animation: toastOut 0.3s ease forwards; }
+    @keyframes toastIn { from { opacity: 0; transform: translateX(20px); } to { opacity: 1; transform: translateX(0); } }
+    @keyframes toastOut { from { opacity: 1; } to { opacity: 0; transform: translateX(20px); } }
+  </style>
+</head>
+<body>
+  <div id="top-bar">
+    <span id="rig-name">VIDEO-STREAM</span>
+    <div id="stats-row"></div>
+  </div>
+  <div id="director-panel">
+    <div class="event-label" id="director-label">Director</div>
+    <div id="director-text"></div>
+  </div>
+  <div id="toast-panel"></div>
+
+  <script src="/static/js/bus.js?v={{ asset_v }}"></script>
+  <script>
+    const statsRow = document.getElementById("stats-row");
+    const directorPanel = document.getElementById("director-panel");
+    const directorLabel = document.getElementById("director-label");
+    const directorText = document.getElementById("director-text");
+    const toastPanel = document.getElementById("toast-panel");
+
+    let cameras = [];
+    let director = null;
+    let safety = null;
+
+    function esc(s) {
+      const d = document.createElement("div");
+      d.textContent = String(s);
+      return d.innerHTML;
+    }
+
+    function pulse(el) {
+      el.classList.add("pulse");
+      setTimeout(() => el.classList.remove("pulse"), 400);
+    }
+
+    function renderStats() {
+      const parts = [];
+      cameras.forEach((cam) => {
+        const onAir = director && director.enabled && director.active === cam.index;
+        parts.push(
+          `<div class="stat">${onAir ? '<span class="live-dot"></span>' : ""}` +
+            `<span>${esc(cam.name)}</span>` +
+            `<span class="badge ${cam.active ? "live" : "off"}">${cam.active ? "LIVE" : "OFF"}</span></div>`
+        );
+      });
+      if (safety) {
+        parts.push('<div class="stat-divider"></div>');
+        parts.push(
+          safety.kill_switch
+            ? '<div class="stat"><span class="badge killed">KILLED</span></div>'
+            : `<div class="stat"><span>auto</span><span class="stat-val" id="budget-val">${esc(
+                safety.remaining
+              )}/${esc(safety.max_actions)}</span></div>`
+        );
+      }
+      const html = parts.join("");
+      if (statsRow.dataset.html !== html) {
+        statsRow.innerHTML = html;
+        statsRow.dataset.html = html;
+        const budget = document.getElementById("budget-val");
+        if (budget) pulse(budget);
+      }
+    }
+
+    function renderDirector() {
+      if (!director || !director.enabled) {
+        directorPanel.classList.remove("visible", "on-air");
+        return;
+      }
+      const cam = director.active != null ? cameras.find((c) => c.index === director.active) : null;
+      const onAir = cam || director.active_rule;
+      directorPanel.classList.add("visible");
+      directorPanel.classList.toggle("on-air", !!onAir);
+      directorLabel.textContent = onAir ? "On air" : "Director";
+      const who = cam ? cam.name : director.active_rule || "waiting";
+      const why = director.last_decision ? ` · ${director.last_decision}` : "";
+      const text = `${who}${why}`;
+      if (directorText.textContent !== text) directorText.textContent = text;
+    }
+
+    function toast(label, text, accent) {
+      const card = document.createElement("div");
+      card.className = "toast-card";
+      card.style.setProperty("--accent", accent || "#4fd1c5");
+      card.innerHTML = `<div class="toast-label">${esc(label)}</div>${esc(text)}`;
+      toastPanel.appendChild(card);
+      while (toastPanel.children.length > 6) toastPanel.firstChild.remove();
+      setTimeout(() => {
+        card.classList.add("exit");
+        setTimeout(() => card.remove(), 300);
+      }, 5000);
+    }
+
+    Bus.on("cameras", (cams) => {
+      if (!Array.isArray(cams)) return;
+      cameras = cams;
+      renderStats();
+      renderDirector();
+    });
+    Bus.on("director", (d) => {
+      director = d;
+      renderStats();
+      renderDirector();
+    });
+    Bus.on("safety", (s) => {
+      safety = s;
+      renderStats();
+    });
+    Bus.on("replay_saved", (r) => toast("Replay", r.label || "Highlight saved", "#ffcc00"));
+    Bus.on("scene_switch", (s) => toast("Cut", s.scene || "", "#00e676"));
+  </script>
+</body>
+</html>

@@ -1,0 +1,12 @@
+{
+  "_comment": "Hybrid director rules: motion:<cameraIndex> uses this rig's motion score [0..1]; audio:<obsInputName> uses live OBS loudness in dBFS (input names match case-insensitively). Higher priority wins ties; hold = seconds a rule must stay on top before the cut; cooldown = minimum seconds between cuts.",
+  "cooldown": 1.6,
+  "default_hold": 0.5,
+  "hysteresis_db": 3,
+  "rules": [
+    { "source": "audio:Mic/Aux", "scene": "Camera",   "threshold": -55, "priority": 130, "hold": 0.2 },
+    { "source": "audio:Desktop Audio", "scene": "Gameplay", "threshold": -55, "priority": 90,  "hold": 0.3 },
+    { "source": "motion:0", "scene": "Cam A", "threshold": 0.05, "priority": 60 },
+    { "source": "motion:1", "scene": "Cam B", "threshold": 0.05, "priority": 60 }
+  ]
+}

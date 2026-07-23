@@ -40,9 +40,14 @@
           <span class="dot"></span>
           <span id="kill-label">KILL</span>
         </button>
-        <a class="btn btn-ghost" href="/avatar" target="_blank" rel="noopener" title="VTuber avatar (beta) — drive a 3D avatar with your face">
-          Avatar
-        </a>
+        <div class="view-tabs" role="tablist" aria-label="Dashboard view">
+          <button type="button" class="view-tab on" id="tab-streams" role="tab" aria-selected="true">Streams</button>
+          <button type="button" class="view-tab" id="tab-avatar" role="tab" aria-selected="false" title="VTuber avatar studio — drive a 3D avatar with your face">Avatar</button>
+        </div>
+        <a class="btn btn-ghost btn-pop" href="/avatar" target="_blank" rel="noopener" title="Open the avatar studio in its own browser tab (for a second monitor)">↗</a>
+        <button type="button" class="btn btn-ghost" id="btn-setup" aria-pressed="false" title="Rig setup: scan, propose a scene map, verify, edit settings">
+          Setup
+        </button>
         <button type="button" class="btn btn-ghost" id="btn-refresh" title="Re-scan cameras">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <path d="M21 12a9 9 0 1 1-2.64-6.36"/>
@@ -53,6 +58,7 @@
       </div>
     </header>
 
+    <div id="view-streams">
     <section class="howto panel">
       <div class="howto-grid">
         <div>
@@ -70,6 +76,22 @@
           <li>In OBS: Sources → Browser → paste URL → set width/height</li>
         </ol>
       </div>
+    </section>
+
+    <section class="panel setup-panel hidden" id="setup-panel">
+      <div class="setup-head">
+        <div>
+          <span class="eyebrow">Rig setup</span>
+          <h2>Scan · propose · verify</h2>
+        </div>
+        <div class="setup-actions">
+          <button type="button" class="btn btn-sm" id="btn-verify">Verify rig</button>
+          <button type="button" class="btn btn-sm" id="btn-generate">Propose scene map</button>
+        </div>
+      </div>
+      <div class="setup-checklist" id="setup-checklist"></div>
+      <div class="setup-proposal hidden" id="setup-proposal"></div>
+      <form class="setup-settings" id="setup-settings" autocomplete="off"></form>
     </section>
 
     <section class="toolbar">
@@ -99,6 +121,29 @@
       </div>
     </section>
 
+    <section class="studio-bar panel" id="studio-bar">
+      <div class="studio-group">
+        <span class="studio-label">Captions</span>
+        <button type="button" class="btn btn-sm" id="btn-stt-start" title="Live captions: your speech → the subtitles overlay (Chrome, this tab does the listening)">🎤 Start</button>
+        <button type="button" class="btn btn-sm on hidden" id="btn-stt-stop">⏹ Stop</button>
+        <span class="muted mono" id="stt-status"></span>
+        <input type="text" id="subtitle-text" class="studio-input" placeholder="or type a line…" />
+        <button type="button" class="btn btn-sm" id="btn-subtitle-push">Push</button>
+      </div>
+      <div class="studio-group">
+        <span class="studio-label">Overlays</span>
+        <span id="overlay-chips"></span>
+        <button type="button" class="btn btn-sm" id="btn-alert-test" title="Fire a test alert on the alerts overlay">Test alert</button>
+      </div>
+      <div class="studio-group" id="chat-group">
+        <span class="studio-label">Chat</span>
+        <input type="text" id="chat-twitch" class="studio-input" placeholder="twitch channel" />
+        <input type="text" id="chat-kick" class="studio-input" placeholder="kick channel" />
+        <button type="button" class="btn btn-sm" id="btn-chat-connect">Connect</button>
+        <span class="muted mono" id="chat-status"></span>
+      </div>
+    </section>
+
     <main id="camera-grid" class="camera-grid" aria-live="polite">
       <div class="empty-state" id="empty-state">
         <div class="empty-icon" aria-hidden="true">◎</div>
@@ -106,6 +151,11 @@
         <p>Grant camera access if prompted. Plug in a USB cam and hit Rescan.</p>
       </div>
     </main>
+    </div>
+
+    <section id="view-avatar" class="avatar-embed hidden">
+      <iframe id="avatar-frame" title="Avatar studio" allow="camera; microphone"></iframe>
+    </section>
 
     <footer class="footer">
       <span class="mono">v{{ version }}</span>
