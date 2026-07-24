@@ -9,6 +9,7 @@ window.Bus = (() => {
   const handlers = new Map();
   let delay = 500;
   let connected = false;
+  let socket = null;
 
   function fire(type, payload) {
     (handlers.get(type) || []).forEach((fn) => {
@@ -34,6 +35,7 @@ window.Bus = (() => {
       reschedule();
       return;
     }
+    socket = ws;
     ws.onopen = () => {
       connected = true;
       delay = 500;
@@ -65,6 +67,15 @@ window.Bus = (() => {
     on(type, fn) {
       if (!handlers.has(type)) handlers.set(type, []);
       handlers.get(type).push(fn);
+    },
+    // Publish INTO the bus (server allowlists which events clients may emit;
+    // used by Avatar Sync so one tracking page can drive every OBS instance).
+    publish(type, payload) {
+      if (connected && socket && socket.readyState === 1) {
+        try {
+          socket.send(JSON.stringify({ publish: { event: type, payload } }));
+        } catch {}
+      }
     },
     get connected() {
       return connected;

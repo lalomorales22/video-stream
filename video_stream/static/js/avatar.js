@@ -56,7 +56,11 @@ const urlZoom = parseFloat(params.get("zoom"));
 const urlPan = parseFloat(params.get("pan"));
 const urlOx = parseFloat(params.get("ox"));
 const urlOy = parseFloat(params.get("oy"));
-const autostart = params.has("autostart") || !!initialSrc;
+// Avatar Sync: ?follow=1 mirrors the pose broadcast by whichever page is
+// actually tracking (over the Studio Bus) instead of tracking locally — the
+// mode OBS browser sources want, since they have no webcam of their own.
+const follow = params.get("follow") === "1";
+const autostart = !follow && (params.has("autostart") || !!initialSrc);
 
 const settings = {
   mirror: params.get("mirror") !== "0",
@@ -429,6 +433,59 @@ function rigPose(rp) {
   rigRotation("leftLowerLeg", rp.LeftLowerLeg, 1, 0.3);
 }
 
+// ── Avatar Sync: one page tracks, every follower mirrors ─────────────
+// The driver publishes the SOLVED Kalidokit rigs (small plain objects) over
+// the Studio Bus; followers feed them straight into rigFace/rigPose, whose
+// built-in lerp smooths network jitter for free.
+let lastSyncSent = 0;
+let followRig = null;
+let followAt = -1e9;
+
+const slimXYZ = (r) => (r ? { x: r.x || 0, y: r.y || 0, z: r.z || 0 } : null);
+
+function slimFace(rf) {
+  return {
+    head: slimXYZ(rf.head),
+    eye: { l: rf.eye?.l ?? 1, r: rf.eye?.r ?? 1 },
+    mouth: {
+      shape: {
+        A: rf.mouth?.shape?.A || 0,
+        I: rf.mouth?.shape?.I || 0,
+        U: rf.mouth?.shape?.U || 0,
+        E: rf.mouth?.shape?.E || 0,
+        O: rf.mouth?.shape?.O || 0,
+      },
+    },
+    brow: typeof rf.brow === "number" ? rf.brow : 0,
+    pupil: { x: rf.pupil?.x || 0, y: rf.pupil?.y || 0 },
+  };
+}
+
+function slimPose(rp) {
+  if (!rp) return null;
+  return {
+    Hips: { rotation: slimXYZ(rp.Hips?.rotation) },
+    Spine: slimXYZ(rp.Spine),
+    RightUpperArm: slimXYZ(rp.RightUpperArm),
+    RightLowerArm: slimXYZ(rp.RightLowerArm),
+    LeftUpperArm: slimXYZ(rp.LeftUpperArm),
+    LeftLowerArm: slimXYZ(rp.LeftLowerArm),
+    RightUpperLeg: slimXYZ(rp.RightUpperLeg),
+    RightLowerLeg: slimXYZ(rp.RightLowerLeg),
+    LeftUpperLeg: slimXYZ(rp.LeftUpperLeg),
+    LeftLowerLeg: slimXYZ(rp.LeftLowerLeg),
+  };
+}
+
+if (follow && window.Bus) {
+  Bus.on("avatar_rig", (r) => {
+    if (r && r.f) {
+      followRig = r;
+      followAt = performance.now();
+    }
+  });
+}
+
 // ── main loop ─────────────────────────────────────────────────────────
 const clock = new THREE.Clock();
 let lastWebcamTime = -1;
@@ -456,6 +513,8 @@ function animate() {
     if (shouldDetect(now)) {
       const frame = currentFrame();
       if (frame) {
+        let sentFace = null;
+        let sentPose = null;
         const res = faceLandmarker.detectForVideo(frame.image, now);
         const lm = res.faceLandmarks?.[0];
         if (lm) {
@@ -467,6 +526,7 @@ function animate() {
           if (rf) {
             rigFace(rf);
             lastFaceAt = now;
+            sentFace = rf;
           }
         }
         // Full-body pose (opt-in) — arms, legs, torso.
@@ -480,8 +540,20 @@ function animate() {
               imageSize: { width: frame.w, height: frame.h },
               enableLegs: true,
             });
-            if (rp) rigPose(rp);
+            if (rp) {
+              rigPose(rp);
+              sentPose = rp;
+            }
           }
+        }
+        // Avatar Sync driver: broadcast the solved pose so OBS followers on
+        // other machines mirror this page exactly (~30Hz, <1KB).
+        if (sentFace && !follow && window.Bus && now - lastSyncSent > 33) {
+          lastSyncSent = now;
+          Bus.publish("avatar_rig", {
+            f: slimFace(sentFace),
+            p: sentPose ? slimPose(sentPose) : null,
+          });
         }
         frames++;
         if (now - fpsAt > 1000) {
@@ -491,6 +563,15 @@ function animate() {
         }
       }
     }
+  }
+
+  // Avatar Sync follower: mirror the driver page's latest pose. Reapplying
+  // each frame lets rigFace/rigPose's lerp glide between network updates;
+  // if the driver goes quiet the idle takes over naturally.
+  if (follow && followRig && performance.now() - followAt < 1500) {
+    rigFace(followRig.f);
+    if (followRig.p) rigPose(followRig.p);
+    lastFaceAt = performance.now();
   }
 
   if (currentVrm) {
@@ -609,8 +690,10 @@ async function copyObsUrl() {
   }
   const p = new URLSearchParams();
   p.set("obs", "1");
+  // Webcam-driven pages can't share their camera with another machine — the
+  // OBS copy mirrors THIS page's live tracking over the Studio Bus instead.
   if (source.kind === "stream") p.set("src", source.url);
-  else p.set("autostart", "1");
+  else p.set("follow", "1");
   if (vrmUrl && vrmUrl !== DEFAULT_VRM) p.set("vrm", vrmUrl);
   if (settings.body) p.set("body", "1");
   p.set("mirror", settings.mirror ? "1" : "0");
@@ -701,6 +784,7 @@ function presetObsUrl(p) {
   const q = new URLSearchParams({ obs: "1" });
   if (p.vrm && p.vrm !== DEFAULT_VRM) q.set("vrm", p.vrm);
   if (s.src) q.set("src", s.src);
+  else q.set("follow", "1"); // no shareable camera → mirror the live tracker
   if (s.body) q.set("body", "1");
   q.set("mirror", s.mirror === false ? "0" : "1");
   if (s.zoom != null) q.set("zoom", s.zoom);
@@ -808,6 +892,8 @@ populateSources();
 if (settings.body) initPose().catch((e) => setStatus("body model: " + (e?.message || e), true));
 if (autostart) {
   startTracking();
+} else if (follow) {
+  setStatus("mirroring the rig's tracker — keep the tracking page open", false, true);
 } else {
   setStatus("ready — press Start tracking (grant camera access)", false);
 }

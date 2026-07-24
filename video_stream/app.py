@@ -396,6 +396,12 @@ async def _replay_error(_request: Request, exc: ReplayError):
     return JSONResponse(status_code=exc.status_code, content={"detail": str(exc)})
 
 
+# Events browser pages may publish INTO the bus. Kept to a tight allowlist so
+# the bus stays a server-owned surface; avatar_rig carries Avatar Sync poses
+# (one tracking page drives every OBS browser-source instance).
+_PUBLISHABLE_EVENTS = {"avatar_rig"}
+
+
 @app.websocket("/ws")
 async def studio_bus(ws: WebSocket):
     """The Studio Bus: pushes retained state on connect, then live events."""
@@ -403,11 +409,24 @@ async def studio_bus(ws: WebSocket):
     pump = asyncio.create_task(hub.pump(ws, queue))
     try:
         while True:
-            # Inbound frames are ignored, but receive with receive() — the
-            # typed helpers raise KeyError on a frame of the other type.
+            # receive() not the typed helpers — those raise KeyError on a
+            # frame of the other type.
             message = await ws.receive()
             if message.get("type") == "websocket.disconnect":
                 break
+            text = message.get("text")
+            if not text or len(text) > 16384:
+                continue
+            try:
+                frame = json.loads(text)
+            except ValueError:
+                continue
+            publish = frame.get("publish")
+            if (
+                isinstance(publish, dict)
+                and publish.get("event") in _PUBLISHABLE_EVENTS
+            ):
+                hub.emit(publish["event"], publish.get("payload"))
     except WebSocketDisconnect:
         pass
     finally:

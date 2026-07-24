@@ -541,10 +541,13 @@ own `.vrm`, mirror toggle, preview backdrop (preview only), and **Copy OBS URL**
 The avatar is a **page you point OBS at**, not a pulled video stream — it renders in the
 browser. That means the tracking runs wherever the page is displayed. Two ways to use it:
 
-- **Same machine:** open `/avatar`, drive it with the local webcam, and add
-  `http://127.0.0.1:8765/avatar?obs=1` as an OBS Browser Source on that machine.
-- **Across your rig (the multi-laptop case):** drive the avatar from a **camera stream**
-  so the camera and the OBS box can be different machines. Point the source at a feed:
+- **Avatar Sync (the default now):** keep the avatar page open and tracking on any
+  machine, and every copied OBS URL carries `?follow=1` — the OBS instance
+  **mirrors your live tracking over the Studio Bus** instead of running its own.
+  One tracker, any number of perfectly-synced OBS sources, no webcam needed on
+  the OBS box. (Keep the tracking page open — it's the puppeteer.)
+- **Independent tracking from a camera stream:** point the source at a feed and
+  the OBS instance tracks it by itself:
 
   ```
   http://<camera-machine>:8765/avatar?obs=1&src=/stream/2
