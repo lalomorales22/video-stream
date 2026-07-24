@@ -35,6 +35,7 @@ from video_stream.peers import PeerManager, parse_peers
 from video_stream.network import get_local_ips, primary_ip
 from video_stream.replay import ReplayConfig, ReplayDirector, ReplayError
 from video_stream.safety import SafetyBlocked, SafetyManager
+from video_stream import autorig
 from video_stream import chaos as chaos_mod
 from video_stream import chat as chat_mod
 from video_stream import overlays
@@ -378,12 +379,14 @@ chaos_mod.init(
     ),
 )
 chaos_mod.engine.reload()
+autorig.init(gallery_dir=GALLERY_DIR, vrm_dir=GALLERY_VRM)
 app.include_router(settings_mod.router)
 app.include_router(setup_wizard.router)
 app.include_router(overlays.router)
 app.include_router(chat_mod.router)
 app.include_router(phone_mod.router)
 app.include_router(chaos_mod.router)
+app.include_router(autorig.router)
 
 
 @app.exception_handler(SafetyBlocked)

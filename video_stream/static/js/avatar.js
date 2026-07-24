@@ -46,6 +46,9 @@ const els = {
   gallery: document.getElementById("gallery"),
   galleryList: document.getElementById("gallery-list"),
   galleryClose: document.getElementById("gallery-close"),
+  btnRig: document.getElementById("btn-rig"),
+  rig: document.getElementById("rig"),
+  rigClose: document.getElementById("rig-close"),
 };
 
 // ── URL config ────────────────────────────────────────────────────────
@@ -131,17 +134,26 @@ function resize() {
 window.addEventListener("resize", resize);
 resize();
 
+// The arm z-axis (swing up/down) points the opposite way in VRM 0.x rigs
+// (e.g. Blender-exported models) vs VRM 1.0 rigs. +1 for VRM0, -1 for VRM1 —
+// multiply any "arms down" z rotation by this so both spec versions rest and
+// track correctly.
+function armZSign(vrm) {
+  return vrm?.meta?.metaVersion === "0" ? 1 : -1;
+}
+
 // Bring the arms down from the default T-pose into a natural rest position.
 function applyRestPose(vrm) {
   const h = vrm.humanoid;
+  const s = armZSign(vrm);
   const set = (name, x, y, z) => {
     const b = h?.getNormalizedBoneNode(name);
     if (b) b.rotation.set(x, y, z);
   };
-  set("leftUpperArm", 0, 0, -1.3);
-  set("rightUpperArm", 0, 0, 1.3);
-  set("leftLowerArm", 0, 0, -0.1);
-  set("rightLowerArm", 0, 0, 0.1);
+  set("leftUpperArm", 0, 0, 1.3 * s);
+  set("rightUpperArm", 0, 0, -1.3 * s);
+  set("leftLowerArm", 0, 0, 0.1 * s);
+  set("rightLowerArm", 0, 0, -0.1 * s);
 }
 
 // Camera framing state — adjustable live (scroll zoom, drag pan) or via URL.
@@ -420,9 +432,11 @@ function rigPose(rp) {
     rigRotation("chest", rp.Spine, 0.25, 0.3);
     rigRotation("spine", rp.Spine, 0.45, 0.3);
   }
-  // Negate the arm swing axis (z): Kalidokit's arm output comes in vertically
-  // inverted against three-vrm's normalized arm bones, so arms-down read as up.
-  const armFix = (r) => (r ? { x: r.x, y: r.y, z: -r.z } : r);
+  // Fix the arm swing axis (z): Kalidokit's output matches VRM0 rigs directly
+  // but is vertically inverted against VRM1 rigs — same sign rule as the rest
+  // pose, so arms-up reads as up on both spec versions.
+  const s = armZSign(currentVrm);
+  const armFix = (r) => (r ? { x: r.x, y: r.y, z: r.z * s } : r);
   rigRotation("rightUpperArm", armFix(rp.RightUpperArm), 1, 0.3);
   rigRotation("rightLowerArm", armFix(rp.RightLowerArm), 1, 0.3);
   rigRotation("leftUpperArm", armFix(rp.LeftUpperArm), 1, 0.3);
@@ -845,6 +859,7 @@ async function renderGallery() {
 }
 
 els.btnGallery.addEventListener("click", () => {
+  els.rig?.classList.add("hidden"); // both slide in from the right edge
   els.gallery.classList.toggle("hidden");
   if (!els.gallery.classList.contains("hidden")) renderGallery();
 });
@@ -881,6 +896,418 @@ window.addEventListener("pointermove", (e) => {
 els.canvas.addEventListener("dblclick", () => {
   if (currentVrm) (settings.body ? frameFullBody : frameOnHead)(currentVrm);
 });
+
+// ── Rig Studio: raw .glb in, drivable VRM out ─────────────────────────
+// The server does the work in headless Blender; this panel is the part you
+// look at. It matters that you can SEE the result — a rig that binds the mesh
+// but blinks the wrong spot looks identical in JSON — so every stage shows a
+// render, and the eyes/mouth are placeable by clicking the face.
+const rig = {
+  status: null,     // /api/rig payload
+  source: null,     // the uploaded model
+  analysis: null,   // what Blender measured and guessed
+  archetype: null,  // the kind of creature, once chosen
+  eyes: [],         // hand-placed eye centres, normalised to the head shot
+  mouth: null,
+  job: null,        // the running (or finished) job snapshot
+  busy: false,
+};
+
+const KIND_HINT = "Pick what it is — that decides where the bones go.";
+
+function rigSet(html) {
+  document.getElementById("rig-body").innerHTML = html;
+}
+
+function rigFoot(text, cls = "") {
+  const foot = document.getElementById("rig-foot");
+  foot.className = "gallery-foot " + cls;
+  foot.textContent = text;
+}
+
+async function rigRefresh() {
+  try {
+    rig.status = await (await fetch("/api/rig")).json();
+  } catch {
+    rig.status = { available: false, error: "couldn't reach the server", archetypes: [] };
+    return;
+  }
+  // Reopening the panel (or reloading the page) mid-rig should pick the job
+  // back up rather than offering to start over while Blender is still going.
+  if (!rig.job || !rig.busy) {
+    const live = (rig.status.jobs || []).find((j) => j.state === "running" || j.state === "queued");
+    if (live) {
+      rig.job = live;
+      rig.busy = true;
+      rigPoll();
+    }
+  }
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+}
+
+function rigRender() {
+  if (!rig.status) return;
+  if (!rig.status.available) {
+    rigSet(
+      `<div><h4>Blender isn't set up</h4>` +
+        `<p>Auto-rigging runs in <b>Blender</b> with the <b>VRM add-on</b>, headless on this machine. ` +
+        `Neither costs anything and it's a one-time setup:</p>` +
+        `<p class="muted">1 · Install Blender from <b>blender.org</b>.<br>` +
+        `2 · Open it → Edit → Preferences → Get Extensions → search <b>VRM</b> → install ` +
+        `<b>VRM Add-on for Blender</b>.<br>3 · Come back and hit Re-check.</p>` +
+        `<p class="bad">${escapeHtml(rig.status.error || "")}</p></div>` +
+        `<button id="rig-recheck" type="button">Re-check</button>`
+    );
+    document.getElementById("rig-recheck").addEventListener("click", async () => {
+      rigFoot("looking for Blender…");
+      rig.status = await (await fetch("/api/rig/rescan", { method: "POST" })).json();
+      rigRender();
+      rigFoot(rig.status.available ? "Blender found ✓" : "still not finding it", rig.status.available ? "" : "bad");
+    });
+    return;
+  }
+
+  if (rig.job && rig.job.state === "done" && rig.job.kind === "rig") return rigRenderResult();
+  if (rig.busy) return rigRenderProgress();
+  if (rig.analysis) return rigRenderSetup();
+  rigRenderDrop();
+}
+
+function rigRenderDrop() {
+  rigSet(
+    `<div class="rig-drop" id="rig-drop">` +
+      `<p><b>Drop a model here</b></p>` +
+      `<p class="muted">.glb · .gltf · .fbx — straight out of Tripo, Meshy, Blender, anywhere</p>` +
+      `<p style="margin-top:10px"><label class="file">Choose a file<input id="rig-file" type="file" accept=".glb,.gltf,.fbx" /></label></p>` +
+    `</div>` +
+    `<p class="muted">It gets a skeleton, skin weights, blink and mouth shapes, then comes back as a VRM ` +
+      `you can drive with your face — about a minute, all on this machine.</p>`
+  );
+  const drop = document.getElementById("rig-drop");
+  document.getElementById("rig-file").addEventListener("change", (e) => {
+    if (e.target.files?.[0]) rigUpload(e.target.files[0]);
+  });
+  ["dragenter", "dragover"].forEach((ev) =>
+    drop.addEventListener(ev, (e) => {
+      e.preventDefault();
+      drop.classList.add("over");
+    })
+  );
+  ["dragleave", "drop"].forEach((ev) =>
+    drop.addEventListener(ev, (e) => {
+      e.preventDefault();
+      drop.classList.remove("over");
+    })
+  );
+  drop.addEventListener("drop", (e) => {
+    const file = e.dataTransfer?.files?.[0];
+    if (file) rigUpload(file);
+  });
+}
+
+async function rigUpload(file) {
+  const mb = (file.size / 1e6).toFixed(0);
+  rigFoot(`uploading ${file.name} (${mb} MB)…`);
+  rig.busy = true;
+  rigRenderProgress("uploading the model", 0.05);
+  try {
+    const res = await fetch("/api/rig/sources", {
+      method: "POST",
+      // Header values must be Latin-1; a model called ペンギン.glb would
+      // throw before the request left the page.
+      headers: { "x-file-name": encodeURIComponent(file.name) },
+      body: file,
+    });
+    if (!res.ok) throw new Error((await res.json()).detail || "upload failed");
+    rig.source = await res.json();
+    rig.analysis = null;
+    rig.eyes = [];
+    rig.mouth = null;
+    await rigStart("analyze", { source_id: rig.source.id });
+  } catch (err) {
+    rig.busy = false;
+    rigRender();
+    rigFoot(String(err.message || err), "bad");
+  }
+}
+
+async function rigStart(kind, body) {
+  const url = kind === "analyze" ? "/api/rig/analyze" : "/api/rig/jobs";
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error((await res.json()).detail || `${kind} failed to start`);
+  rig.job = await res.json();
+  rig.busy = true;
+  rigRenderProgress();
+  rigPoll();
+}
+
+// The bus pushes progress, but a page that just opened (or a dropped socket)
+// still needs an answer — so poll slowly as a backstop and let the bus make it
+// feel live.
+let rigPollTimer = null;
+function rigPoll() {
+  clearTimeout(rigPollTimer);
+  rigPollTimer = setTimeout(async () => {
+    if (!rig.job || !rig.busy) return;
+    try {
+      const res = await fetch("/api/rig/jobs/" + rig.job.id);
+      if (res.status === 404) {
+        // The server forgot this job (restarted, or it aged out of the
+        // history). Polling forever behind a frozen bar helps nobody.
+        rig.busy = false;
+        rig.job = null;
+        rigRender();
+        rigFoot("lost track of that job — the server restarted. Try again.", "bad");
+        return;
+      }
+      rigOnJob(await res.json());
+    } catch {
+      /* the bus or the next poll will catch up */
+    }
+    if (rig.busy) rigPoll();
+  }, 2000);
+}
+
+const TERMINAL = ["done", "failed", "cancelled"];
+
+function rigOnJob(job) {
+  if (!job || !rig.job || job.id !== rig.job.id) return;
+  // The bus re-sends retained state to every new subscriber, so a finished job
+  // arrives again whenever the socket reconnects. Handling it twice would
+  // rebuild the setup screen underneath the user — throwing away the archetype
+  // they picked and the name they typed.
+  if (TERMINAL.includes(rig.job.state) && rig.job.state === job.state) return;
+  rig.job = job;
+  if (job.state === "running" || job.state === "queued") {
+    rigRenderProgress();
+    return;
+  }
+  rig.busy = false;
+  clearTimeout(rigPollTimer);
+  if (job.state !== "done") {
+    rigRender();
+    rigFoot(job.error ? job.error.split("\n")[0].slice(0, 160) : "cancelled", "bad");
+    return;
+  }
+  if (job.kind === "analyze") {
+    rig.analysis = job.result;
+    rig.archetype = job.result.archetype;
+    rigRenderSetup();
+    rigFoot("Check the guess, then rig it.");
+  } else {
+    rigRenderResult();
+    rigFoot("Rigged ✓ — load it, or save it to your gallery.");
+  }
+}
+
+function rigRenderProgress(step, progress) {
+  const job = rig.job || {};
+  const label = step || job.step || "working…";
+  const pct = Math.round(100 * (progress != null ? progress : job.progress || 0));
+  const log = (job.log || []).slice(-8).join("\n");
+  rigSet(
+    `<div><h4>${job.kind === "rig" ? "Rigging" : "Reading the model"}</h4>` +
+      `<p>${escapeHtml(label)} · ${pct}%</p>` +
+      `<div class="rig-bar"><span style="width:${pct}%"></span></div></div>` +
+      (log ? `<div class="rig-log">${escapeHtml(log)}</div>` : "") +
+      // Only offer Cancel once there's a job to cancel; during the upload
+      // there's nothing on the server yet to stop.
+      (rig.job ? `<button id="rig-cancel" type="button">Cancel</button>` : "")
+  );
+  const cancel = document.getElementById("rig-cancel");
+  if (cancel)
+    cancel.addEventListener("click", async () => {
+      if (rig.job) await fetch(`/api/rig/jobs/${rig.job.id}/cancel`, { method: "POST" });
+      rig.busy = false;
+      rigRender();
+    });
+}
+
+function rigRenderSetup() {
+  const a = rig.analysis;
+  const kinds = (rig.status.archetypes || [])
+    .map(
+      (k) =>
+        `<button class="rig-kind${k.id === rig.archetype ? " on" : ""}" data-kind="${k.id}" ` +
+        `title="${escapeHtml(k.description)}">${escapeHtml(k.label)}</button>`
+    )
+    .join("");
+  const chosen = (rig.status.archetypes || []).find((k) => k.id === rig.archetype);
+  const turned = a.facing?.turned_deg;
+  rigSet(
+    `<div class="rig-shots"><img src="${a.previews.front}" alt="front"><img src="${a.previews.side}" alt="side"></div>` +
+      `<p class="muted">Turned ${turned}° to face front${turned ? "" : " (it already did)"} · ` +
+      `${a.measure.tris.toLocaleString()} triangles after simplifying</p>` +
+      `<div><h4>What is it?</h4><div class="rig-kinds">${kinds}</div>` +
+      `<ul class="rig-why">${(a.reasons || []).map((r) => `<li>${escapeHtml(r)}</li>`).join("")}</ul>` +
+      `<p class="muted" id="rig-kind-desc">${escapeHtml(chosen ? chosen.description : KIND_HINT)}</p></div>` +
+      `<hr>` +
+      `<div><h4>Face</h4><p class="muted">Click the left eye, the right eye, then the mouth. ` +
+      `Skip it and they're guessed from the shape — usually close, rarely perfect.</p>` +
+      `<div class="rig-face" id="rig-face"><img id="rig-face-img" src="${a.previews.head}" alt="head"></div>` +
+      `<p class="rig-row" style="margin-top:8px"><button id="rig-face-reset" type="button">Clear marks</button>` +
+      `<span class="muted" id="rig-face-state"></span></p></div>` +
+      `<hr>` +
+      `<div><h4>Details</h4>` +
+      `<p class="rig-row"><input id="rig-name" type="text" placeholder="Name" value="${escapeHtml(
+        rig.source?.name?.replace(/\.[^.]+$/, "") || "Avatar"
+      )}"></p>` +
+      `<p class="rig-row" style="margin-top:8px"><span class="muted">Height</span>` +
+      `<input id="rig-height" type="number" step="0.05" min="0.1" max="4" value="${a.suggested_height_m}"><span class="muted">m</span></p></div>` +
+      `<div class="rig-row"><button class="primary" id="rig-go" type="button">Rig it</button>` +
+      `<button id="rig-restart" type="button">Different file</button></div>`
+  );
+
+  document.querySelectorAll(".rig-kind").forEach((btn) =>
+    btn.addEventListener("click", () => {
+      rig.archetype = btn.dataset.kind;
+      document.querySelectorAll(".rig-kind").forEach((b) => b.classList.toggle("on", b === btn));
+      const k = (rig.status.archetypes || []).find((x) => x.id === rig.archetype);
+      document.getElementById("rig-kind-desc").textContent = k ? k.description : KIND_HINT;
+    })
+  );
+
+  const face = document.getElementById("rig-face");
+  const drawPins = () => {
+    face.querySelectorAll(".rig-pin").forEach((p) => p.remove());
+    const pin = (pt, cls) => {
+      const el = document.createElement("div");
+      el.className = "rig-pin " + cls;
+      el.style.left = pt.u * 100 + "%";
+      el.style.top = pt.v * 100 + "%";
+      face.appendChild(el);
+    };
+    rig.eyes.forEach((e) => pin(e, ""));
+    if (rig.mouth) pin(rig.mouth, "mouth");
+    document.getElementById("rig-face-state").textContent =
+      rig.mouth ? "eyes + mouth set" : rig.eyes.length ? `${rig.eyes.length}/2 eyes` : "using the guess";
+  };
+  face.addEventListener("click", (e) => {
+    const box = document.getElementById("rig-face-img").getBoundingClientRect();
+    const pt = { u: (e.clientX - box.left) / box.width, v: (e.clientY - box.top) / box.height };
+    if (rig.eyes.length < 2) rig.eyes.push(pt);
+    else rig.mouth = pt;
+    drawPins();
+  });
+  document.getElementById("rig-face-reset").addEventListener("click", () => {
+    rig.eyes = [];
+    rig.mouth = null;
+    drawPins();
+  });
+  drawPins();
+
+  document.getElementById("rig-restart").addEventListener("click", () => {
+    rig.analysis = null;
+    rig.job = null;
+    rigRender();
+  });
+  document.getElementById("rig-go").addEventListener("click", async () => {
+    try {
+      await rigStart("rig", {
+        source_id: rig.source.id,
+        archetype: rig.archetype || "auto",
+        name: document.getElementById("rig-name").value || "Avatar",
+        height_m: parseFloat(document.getElementById("rig-height").value) || 0,
+        eyes: rig.eyes.length === 2 ? rig.eyes : null,
+        mouth: rig.mouth,
+      });
+    } catch (err) {
+      rigFoot(String(err.message || err), "bad");
+    }
+  });
+}
+
+function rigRenderResult() {
+  const r = rig.job.result;
+  const shot = (key, label) =>
+    r.previews[key]
+      ? `<div style="flex:1"><img src="${r.previews[key]}?v=${rig.job.id}" alt="${label}">` +
+        `<p class="muted" style="text-align:center">${label}</p></div>`
+      : "";
+  const travel = r.face?.travel || {};
+  const faint = Object.entries(travel).filter(([, v]) => v < 0.004);
+  rigSet(
+    `<div><h4>${escapeHtml(r.archetype_label)}</h4>` +
+      `<p class="good">Rigged in ${r.seconds}s · ${r.bones} bones · ` +
+      `${(r.bytes / 1e6).toFixed(1)} MB · ${r.height_m} m tall</p>` +
+      `<p class="muted">${r.weights.method === "automatic" ? "Heat" : "Proximity"} weights, ` +
+      `${r.weights.covered.toLocaleString()}/${r.weights.total.toLocaleString()} vertices bound</p></div>` +
+      `<div class="rig-shots">${shot("front", "rig")}${shot("side", "side")}</div>` +
+      `<div class="rig-shots">${shot("face", "face")}${shot("blink", "blink")}${shot("mouth", "mouth")}</div>` +
+      (faint.length
+        ? `<p class="warn">The ${faint
+            .map(([k]) => k.replace("_", " "))
+            .join(" and ")} shape barely moves. Re-run and click the eyes and mouth on the face shot.</p>`
+        : `<p class="muted">Check the blink and mouth shots — that's the tracking driving the face.</p>`) +
+      `<div class="rig-row"><button class="primary" id="rig-load" type="button">Load it</button>` +
+      `<button id="rig-save" type="button">Save to gallery</button></div>` +
+      `<div class="rig-row"><button id="rig-again" type="button">Rig again, differently</button>` +
+      `<button id="rig-new" type="button">Another file</button></div>`
+  );
+  document.getElementById("rig-load").addEventListener("click", async () => {
+    currentVrmUrl = r.vrm;
+    uploadedFile = null;
+    // Await the load before reframing: setBody frames around the avatar's
+    // bones, and firing it early frames the one being replaced.
+    await loadVRM(r.vrm);
+    await setBody(r.tracking === "full").catch(() => {});
+    els.rig.classList.add("hidden");
+  });
+  document.getElementById("rig-save").addEventListener("click", async () => {
+    // Deliberately does NOT touch currentVrmUrl: the viewer is still showing
+    // whatever was loaded before, and Copy OBS URL must keep describing that,
+    // not a model that only exists in the gallery. Load it first if you want
+    // both.
+    const res = await fetch("/api/avatar/presets", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name: rig.job.label || r.archetype_label,
+        vrm: r.vrm,
+        settings: { ...currentSettings(), body: r.tracking === "full" },
+      }),
+    });
+    rigFoot(res.ok ? "saved to your gallery ✓" : "couldn't save it", res.ok ? "good" : "bad");
+  });
+  document.getElementById("rig-again").addEventListener("click", () => {
+    rig.job = null;
+    rigRenderSetup();
+  });
+  document.getElementById("rig-new").addEventListener("click", () => {
+    rig.analysis = null;
+    rig.job = null;
+    rig.source = null;
+    rigRender();
+  });
+}
+
+els.btnRig.addEventListener("click", async () => {
+  const opening = els.rig.classList.contains("hidden");
+  els.rig.classList.toggle("hidden");
+  els.gallery.classList.add("hidden");
+  if (!opening) return;
+  rigSet("<p class='muted'>looking for Blender…</p>");
+  await rigRefresh();
+  rigRender();
+});
+els.rigClose.addEventListener("click", () => els.rig.classList.add("hidden"));
+
+// Progress from the server, so the panel is live even if this tab was opened
+// halfway through a rig running for someone else on the rig.
+if (window.Bus) {
+  Bus.on("rig", (payload) => {
+    if (!rig.job) return;
+    const mine = (payload.jobs || []).find((j) => j.id === rig.job.id);
+    if (mine) rigOnJob(mine);
+  });
+}
 
 // ── boot ──────────────────────────────────────────────────────────────
 window.__avatarBoot = true; // tells the HTML watchdog the module started OK

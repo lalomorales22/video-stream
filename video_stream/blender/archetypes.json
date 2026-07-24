@@ -1,0 +1,100 @@
+{
+  "version": 1,
+  "_comment": [
+    "Rig recipes. One entry per kind of creature; the fitter in autorig_blender.py",
+    "reads these and places bones on the mesh it actually measured.",
+    "",
+    "Every number is a FRACTION, never a length in metres, so one recipe fits a",
+    "12 cm toy and a 3 m mech:",
+    "  *_z / spine.*      fraction of total height, measured up from the feet",
+    "  *_out              fraction of total height, sideways from the centre line",
+    "  face.eye_h etc.    fraction of the HEAD's own span (0 = neck, 1 = crown)",
+    "  face.*_r           fraction of head width",
+    "",
+    "'measured' landmarks (leg split, arm tip, neck pinch) win over these numbers",
+    "whenever the analysis pass found them; the fractions are the fallback for a",
+    "mesh too fused to measure. bird_biped's spine numbers are lifted from the",
+    "hand-built penguin rig that already streams, so a penguin lands where a",
+    "human rigged it by hand."
+  ],
+  "defaults": {
+    "target_tris": 45000,
+    "height_m": 1.6,
+    "eye_squash": 0.82,
+    "eye_retract": 0.35
+  },
+  "archetypes": {
+    "humanoid": {
+      "label": "Person",
+      "description": "Human proportions — head roughly an eighth of the height, arms and legs about as long as yours.",
+      "examples": "people, anime characters, elves, humanoid robots",
+      "tracking": "full",
+      "mode": "upright",
+      "height_m": 1.65,
+      "spine": { "hips": 0.53, "spine": 0.60, "chest": 0.72, "neck": 0.84, "head_top": 0.97 },
+      "arms": { "present": true, "shoulder_z": 0.82, "shoulder_out": 0.055, "tip_out": 0.36, "tip_z": 0.82, "split": [0.30, 0.72] },
+      "legs": { "present": true, "crotch_z": 0.50, "hip_out": 0.065, "knee": 0.55, "ankle_z": 0.055, "foot_reach": 0.09 },
+      "face": { "eye_h": 0.50, "eye_out": 0.46, "eye_r": 0.17, "mouth_h": 0.26, "mouth_r": 0.34, "mouth_kind": "lips", "mouth_drop_deg": 13 }
+    },
+    "humanoid_creature": {
+      "label": "Creature (standing up)",
+      "description": "Walks on two legs but isn't shaped like a person — big head, short thick limbs, a snout. The safest pick for most AI-generated characters.",
+      "examples": "cartoon animals on two legs, chibi characters, mascots, orcs",
+      "tracking": "full",
+      "mode": "upright",
+      "height_m": 1.5,
+      "spine": { "hips": 0.44, "spine": 0.54, "chest": 0.66, "neck": 0.76, "head_top": 0.96 },
+      "arms": { "present": true, "shoulder_z": 0.72, "shoulder_out": 0.06, "tip_out": 0.28, "tip_z": 0.55, "split": [0.34, 0.74] },
+      "legs": { "present": true, "crotch_z": 0.40, "hip_out": 0.075, "knee": 0.55, "ankle_z": 0.05, "foot_reach": 0.10 },
+      "face": { "eye_h": 0.44, "eye_out": 0.50, "eye_r": 0.19, "mouth_h": 0.30, "mouth_r": 0.40, "mouth_kind": "muzzle", "mouth_drop_deg": 16 }
+    },
+    "bird_biped": {
+      "label": "Bird (penguin, chicken…)",
+      "description": "Upright bird: stubby legs low down, wings or flippers hanging at the sides, a beak that hinges open.",
+      "examples": "penguins, chickens, ducks, owls",
+      "tracking": "full",
+      "mode": "upright",
+      "height_m": 1.2,
+      "spine": { "hips": 0.22, "spine": 0.34, "chest": 0.48, "neck": 0.62, "head_top": 0.95 },
+      "arms": { "present": true, "shoulder_z": 0.60, "shoulder_out": 0.055, "tip_out": 0.26, "tip_z": 0.30, "split": [0.36, 0.72] },
+      "legs": { "present": true, "crotch_z": 0.17, "hip_out": 0.075, "knee": 0.5, "ankle_z": 0.035, "foot_reach": 0.10 },
+      "face": { "eye_h": 0.58, "eye_out": 0.52, "eye_r": 0.17, "mouth_h": 0.34, "mouth_r": 0.55, "mouth_kind": "beak", "mouth_drop_deg": 20 }
+    },
+    "quadruped": {
+      "label": "Four-legged animal",
+      "description": "Stands on all fours, spine running front to back. Front legs drive the avatar's arms, hind legs its legs — the head still follows yours.",
+      "examples": "dogs, cats, horses, boars, dragons",
+      "tracking": "face",
+      "mode": "horizontal",
+      "height_m": 1.0,
+      "spine": { "hips": 0.62, "spine": 0.40, "chest": 0.18, "neck": 0.06, "head_top": 0.0 },
+      "arms": { "present": true, "shoulder_z": 0.62, "shoulder_out": 0.08, "tip_out": 0.08, "tip_z": 0.06, "split": [0.36, 0.74] },
+      "legs": { "present": true, "crotch_z": 0.62, "hip_out": 0.09, "knee": 0.5, "ankle_z": 0.06, "foot_reach": 0.05 },
+      "face": { "eye_h": 0.52, "eye_out": 0.52, "eye_r": 0.18, "mouth_h": 0.28, "mouth_r": 0.45, "mouth_kind": "muzzle", "mouth_drop_deg": 18 }
+    },
+    "bust": {
+      "label": "Head or bust",
+      "description": "A head, helmet or bust with no legs. Only head and neck get real bones; the arms and legs VRM demands are tucked away inside, unweighted.",
+      "examples": "floating heads, helmets, mascot heads, busts",
+      "tracking": "face",
+      "mode": "static",
+      "height_m": 0.5,
+      "spine": { "hips": 0.06, "spine": 0.14, "chest": 0.24, "neck": 0.36, "head_top": 0.95 },
+      "arms": { "present": false, "shoulder_z": 0.30, "shoulder_out": 0.04, "tip_out": 0.10, "tip_z": 0.30, "split": [0.34, 0.70] },
+      "legs": { "present": false, "crotch_z": 0.06, "hip_out": 0.03, "knee": 0.5, "ankle_z": 0.01, "foot_reach": 0.03 },
+      "face": { "eye_h": 0.50, "eye_out": 0.46, "eye_r": 0.18, "mouth_h": 0.26, "mouth_r": 0.40, "mouth_kind": "lips", "mouth_drop_deg": 14 }
+    },
+    "blob": {
+      "label": "Blob / floater",
+      "description": "No obvious limbs — a slime, ghost, orb or drone. One bendy stack from base to top, plus stub arms if the shape has any.",
+      "examples": "slimes, ghosts, orbs, drones, plushies",
+      "tracking": "face",
+      "mode": "upright",
+      "height_m": 1.0,
+      "spine": { "hips": 0.20, "spine": 0.34, "chest": 0.50, "neck": 0.66, "head_top": 0.94 },
+      "arms": { "present": true, "shoulder_z": 0.58, "shoulder_out": 0.05, "tip_out": 0.20, "tip_z": 0.45, "split": [0.36, 0.72] },
+      "legs": { "present": false, "crotch_z": 0.18, "hip_out": 0.05, "knee": 0.5, "ankle_z": 0.02, "foot_reach": 0.04 },
+      "face": { "eye_h": 0.52, "eye_out": 0.48, "eye_r": 0.20, "mouth_h": 0.30, "mouth_r": 0.42, "mouth_kind": "lips", "mouth_drop_deg": 15 }
+    }
+  }
+}

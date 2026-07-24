@@ -2,14 +2,15 @@
 # video-stream installer — one script for the whole studio.
 #
 #   ./install.sh              core install, then asks about each add-on
-#   ./install.sh --all        core + pose + avatar + phone, no questions
+#   ./install.sh --all        core + every add-on, no questions
 #   ./install.sh --core-only  just the rig (lightest install)
-#   ./install.sh --pose --avatar --phone   pick add-ons explicitly
+#   ./install.sh --pose --avatar --phone --rig   pick add-ons explicitly
 #
 # Add-ons (each also has its own script, still usable directly):
 #   pose    MediaPipe skeleton overlay + face-aware auto punch-ins
 #   avatar  VTuber avatar studio (vendored three-vrm + face models)
 #   phone   phone-as-camera HTTPS certificate (needs openssl)
+#   rig     auto-rig raw .glb models into VRM avatars (checks for Blender)
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -28,15 +29,17 @@ die()  { printf '\033[31merror:\033[0m %s\n' "$*" >&2; exit 1; }
 WANT_POSE=""
 WANT_AVATAR=""
 WANT_PHONE=""
+WANT_RIG=""
 ASKED=0
 for arg in "$@"; do
   case "${arg}" in
-    --all)       WANT_POSE=1; WANT_AVATAR=1; WANT_PHONE=1; ASKED=1 ;;
+    --all)       WANT_POSE=1; WANT_AVATAR=1; WANT_PHONE=1; WANT_RIG=1; ASKED=1 ;;
     --core-only) ASKED=1 ;;
     --pose)      WANT_POSE=1; ASKED=1 ;;
     --avatar)    WANT_AVATAR=1; ASKED=1 ;;
     --phone)     WANT_PHONE=1; ASKED=1 ;;
-    -h|--help)   sed -n '2,12p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    --rig)       WANT_RIG=1; ASKED=1 ;;
+    -h|--help)   sed -n '2,13p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) die "unknown option: ${arg} (try --help)" ;;
   esac
 done
@@ -168,6 +171,8 @@ if [[ "${ASKED}" == 0 && -t 0 ]]; then
   [[ "${a}" =~ ^[Nn] ]] || WANT_AVATAR=1
   read -r -p "  Phone as camera — HTTPS cert so phones can join by QR? [Y/n] " a || a=""
   [[ "${a}" =~ ^[Nn] ]] || WANT_PHONE=1
+  read -r -p "  Auto-rig — turn raw .glb models into VRM avatars? [Y/n] " a || a=""
+  [[ "${a}" =~ ^[Nn] ]] || WANT_RIG=1
 elif [[ "${ASKED}" == 0 ]]; then
   info "non-interactive run: core only (add later with ./install.sh --all)"
 fi
@@ -185,6 +190,11 @@ if [[ -n "${WANT_PHONE}" ]]; then
   else
     warn "openssl not found — skipping the phone certificate (install openssl, then ./install-phone.sh)"
   fi
+fi
+if [[ -n "${WANT_RIG}" ]]; then
+  # A check, not an install: it reports whether Blender + the VRM add-on are
+  # here and never fails the run — the studio works fine without them.
+  bash "${ROOT}/install-rig.sh" || warn "auto-rig check failed — re-run ./install-rig.sh later"
 fi
 
 # ── Smoke check ────────────────────────────────────────
@@ -218,6 +228,7 @@ MISSING=""
 [[ -z "${WANT_POSE}" ]] && MISSING="${MISSING}    --pose      skeleton overlay + face-aware auto punch-ins\n"
 [[ -z "${WANT_AVATAR}" ]] && MISSING="${MISSING}    --avatar    VTuber avatar studio (three-vrm + tracking)\n"
 [[ -z "${WANT_PHONE}" ]] && MISSING="${MISSING}    --phone     phone-as-camera HTTPS certificate\n"
+[[ -z "${WANT_RIG}" ]] && MISSING="${MISSING}    --rig       auto-rig raw .glb models into VRM avatars\n"
 if [[ -n "${MISSING}" ]]; then
   echo "  Add-ons you skipped (get them anytime with ./install.sh <flag>):"
   printf "%b" "${MISSING}"

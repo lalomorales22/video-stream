@@ -32,6 +32,9 @@ Broadcast every local camera over Wi‑Fi. Each stream gets a shareable URL you 
   auto-switches OBS to the active one over its WebSocket API, hands-free
 - [**Avatar / VTuber**](#avatar-vtuber-beta) *(beta)* — drive a rigged 3D avatar with your face
   (head, blinks, mouth) in the browser; renders transparent for OBS
+- [**Auto-rig**](#auto-rig-raw-model--drivable-avatar) — drop a raw unrigged `.glb` in and get a
+  drivable VRM back about a minute later: skeleton, skin weights, blink and mouth shapes, all
+  built on your own machine
 
 **Studio** (live-production controls on the dashboard)
 
@@ -74,11 +77,11 @@ cd video-stream
 ```
 
 **One script installs everything.** Run it bare (`./install.sh`) and it installs the
-core rig, then asks about each add-on — pose tracking, the avatar studio, and
-phone-as-camera — where just pressing Enter says yes to all of them. Flags skip the
-questions: `--all`, `--core-only`, or any mix of `--pose --avatar --phone`. (The
-standalone `install-pose.sh` / `install-avatar.sh` / `install-phone.sh` scripts still
-work too.)
+core rig, then asks about each add-on — pose tracking, the avatar studio,
+phone-as-camera, and auto-rigging — where just pressing Enter says yes to all of them. Flags skip the
+questions: `--all`, `--core-only`, or any mix of `--pose --avatar --phone --rig`. (The
+standalone `install-pose.sh` / `install-avatar.sh` / `install-phone.sh` /
+`install-rig.sh` scripts still work too.)
 
 The installer will:
 
@@ -590,12 +593,97 @@ Paste that into OBS on any machine.
 - **Full body (beta).** The **Full body** button adds arms/legs/torso tracking (MediaPipe
   Pose). Stand back so your body is in frame; it auto-widens the shot. Legs get jittery
   when your lower body is out of frame — face-only stays cleaner for a seated close-up.
-- **Your Tripo/other model needs prep.** A raw GLB/FBX isn't drivable as-is — it needs a
-  humanoid rig ([Mixamo](https://mixamo.com)) and face blendshapes, then conversion to
-  VRM. That's the real time sink; a VRoid avatar "just works." (`path_b.md` §6.)
+- **Got a raw model?** A GLB/FBX out of Tripo or Meshy isn't drivable as-is — it has no
+  skeleton and no face blendshapes. [**Auto-rig**](#auto-rig-raw-model--drivable-avatar)
+  builds both for you in about a minute; a VRoid avatar still "just works" with no prep.
 - **Runs offline** once installed — libraries are vendored, no CDN at runtime.
 - **Roadmap:** body + hands tracking, high-fidelity face (52 ARKit blendshapes /
   "PerfectSync"), and an AI-persona avatar (LLM + TTS + audio lip-sync). See `path_b.md`.
+
+## Auto-rig (raw model → drivable avatar)
+
+Generating a character is easy now. Making it *move* was the hard part: a `.glb` out of
+Tripo or Meshy is a lovely statue — one mesh, no skeleton, no blendshapes — and turning it
+into a VRM meant a Blender afternoon per model.
+
+**Auto-rig does that on your machine, in seconds.** Open the avatar studio, press
+**Auto-rig**, drop the file in. You get back a VRM with a humanoid skeleton, skin weights,
+and blink/mouth shapes wired to the same expressions the face tracker drives — it lands in
+your gallery and has an OBS URL like any other avatar. A 985k-triangle Tripo penguin takes
+about 12 seconds to read and 15 to rig, on a laptop CPU.
+
+```bash
+./install-rig.sh      # checks for Blender + its VRM add-on; installs nothing
+```
+
+It needs **Blender** (any recent version) with the **VRM Add-on for Blender** — both free.
+The installer only *checks*: Blender is a 400 MB desktop app and the add-on lives in your
+Blender preferences, so it tells you what's missing instead of reaching into your machine.
+Blender somewhere unusual? Set `VIDEO_STREAM_BLENDER=/path/to/blender`. Nothing leaves the
+box, and nothing else in the studio cares whether Blender is there.
+
+### What it actually does
+
+1. **Reads the model** — imports it, simplifies to ~45k triangles, works out which way it's
+   facing (AI generators point their exports every which way; Tripo faces +X, VRM wants the
+   other axis entirely) and stands it upright on the floor at a sensible height in metres.
+2. **Guesses what it is** and shows you *why* — "body starts 14% up, that's how much of it
+   is legs", "face juts 0.46×height forward: a beak or a snout" — next to front and side
+   renders. Disagree and pick another kind; that's the whole point of showing the reasons.
+3. **Builds a skeleton for that kind of creature**, fitted to the body it measured — the leg
+   split, the neck pinch, how far a wing actually reaches — not a stock rig scaled to fit.
+4. **Skins it.** Blender's heat weighting when the mesh is clean enough, and a
+   nearest-bone fallback when it isn't (a jacket modelled as a separate floating shell is
+   enough to make heat weighting give up and weight nothing at all).
+5. **Generates the face shapes** nothing ships with: an eye squashing shut on each side, and
+   a jaw or beak that hinges open. One mouth shape covers all five vowels at different
+   weights — the trick the hand-built penguin in this repo uses.
+6. **Exports a VRM 1.0** and renders it back to you: the rig, a head close-up, the blink, the
+   mouth. A blink is a few hundred vertices moving a centimetre, so you want to *see* it.
+
+### Kinds of creature
+
+The kind decides where bones go — a penguin's hips are not at 53% of its height, and its
+flippers hang rather than stick out. Six recipes, in
+[`video_stream/blender/archetypes.json`](video_stream/blender/archetypes.json):
+
+| Kind | For |
+|------|-----|
+| **Person** | human proportions — people, anime characters, humanoid robots |
+| **Creature (standing up)** | two legs, not human-shaped: cartoon animals, chibi, mascots, orcs |
+| **Bird (penguin, chicken…)** | stubby legs, flippers at the sides, a beak that hinges |
+| **Four-legged animal** | dogs, cats, horses, boars — spine front-to-back, head still follows yours |
+| **Head or bust** | floating heads, helmets, mascot heads |
+| **Blob / floater** | slimes, ghosts, orbs, drones |
+
+Every number in a recipe is a *fraction* of the model's height, never a length, so one
+recipe fits a 12 cm figurine and a 3 m mech. The measured landmarks win over the recipe
+wherever the analysis found them. The bird numbers are lifted from the hand-rigged penguin
+that already streams on this rig, so a penguin lands where a human put it.
+
+### Getting the face right
+
+Eyes are the one thing geometry can't reliably find — a beak is closer to a penguin's eye
+socket than the eye is. The guess is usually close; when it isn't, **click the left eye, the
+right eye, then the mouth** on the head close-up and rig again. The clicks map straight back
+onto the model through the render's own camera, so what you click is where the shape lands.
+
+If a shape barely moves, the result panel says so rather than leaving you to notice mid-stream.
+
+### Notes
+
+- Rigs run **one at a time** on a worker thread — a rig pass wants a core and a gigabyte —
+  and stream progress over the [Studio Bus](#studio-bus-safety--replay--smart-zoom), so the
+  panel shows Blender's own log live instead of a spinner.
+- Accepts **`.glb`, `.gltf`, `.fbx`**, up to 250 MB. A `.gltf` has to be self-contained
+  (`data:` URIs, 64 MB cap): one that names separate files is refused, because those names
+  are resolved against *this* machine's disk. `.glb` is the safe, smaller export anyway.
+- Four-legged animals get face-only tracking by default: mapping front legs onto an avatar's
+  arms is anatomically honest and looks strange when your arms drive them.
+- Re-rig the same upload with a different kind as often as you like. The last 12 uploads are
+  kept (they're ~30 MB each); older ones are dropped as new ones arrive.
+- If you've set an **auth token** in the settings, rigging needs it like any other write —
+  it spends this machine's CPU and disk.
 
 ## Firewall notes
 
@@ -718,6 +806,7 @@ video-stream/
 ├── install-pose.sh     # optional pose-estimation add-on
 ├── install-avatar.sh   # optional VTuber-avatar assets (three-vrm, mediapipe, model)
 ├── install-phone.sh    # optional phone-as-camera HTTPS certificate
+├── install-rig.sh      # optional auto-rig check (Blender + VRM add-on)
 ├── presets/            # director rules example + chaos choreography presets
 ├── path_b.md           # avatar feature design doc
 ├── video_stream/
@@ -736,6 +825,8 @@ video-stream/
 │   ├── peers.py        # Rig Link: remote motion signals for the director
 │   ├── phone.py        # phone-as-camera signaling + QR + pages
 │   ├── chaos.py        # JSON OBS choreography + fx effects engine
+│   ├── autorig.py      # auto-rig job queue + API (drives headless Blender)
+│   ├── blender/        # the rigger that runs inside Blender + archetype recipes
 │   ├── obs.py          # minimal OBS WebSocket v5 client + audio meters
 │   ├── network.py      # LAN IP detection
 │   ├── static/         # CSS / JS (+ vendored avatar libs, gitignored)

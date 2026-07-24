@@ -47,4 +47,6 @@ video-stream = "video_stream.app:main"
 include = ["video_stream*"]
 
 [tool.setuptools.package-data]
-video_stream = ["static/**/*", "templates/**/*"]
+# blender/ ships the auto-rig script + archetype recipes; they're read at
+# runtime and handed to a Blender subprocess, so they must land in the install.
+video_stream = ["static/**/*", "templates/**/*", "blender/*"]
