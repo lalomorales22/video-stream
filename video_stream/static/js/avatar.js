@@ -576,6 +576,20 @@ els.btnBg.addEventListener("click", () => {
   els.btnBg.classList.toggle("on");
 });
 
+// The OBS URL must reproduce the CURRENT look on another machine. A model
+// loaded from a local file only exists in this browser session — push it to
+// the gallery first so OBS elsewhere can fetch it by URL.
+async function shareableVrmUrl() {
+  if (currentVrmUrl) return currentVrmUrl;
+  if (!uploadedFile) return null;
+  setStatus("uploading avatar so OBS on other machines can load it…");
+  const res = await fetch("/api/avatar/vrm", { method: "POST", body: uploadedFile });
+  if (!res.ok) throw new Error("avatar upload failed");
+  const d = await res.json();
+  currentVrmUrl = d.url; // from now on this session shares the server copy
+  return currentVrmUrl;
+}
+
 // Build a ready-to-paste OBS Browser Source URL from the current setup, using the
 // machine's LAN IP so it works from OBS on another computer.
 async function copyObsUrl() {
@@ -586,11 +600,18 @@ async function copyObsUrl() {
   } catch {
     /* fall back to current host */
   }
+  let vrmUrl = null;
+  try {
+    vrmUrl = await shareableVrmUrl();
+  } catch {
+    setStatus("could not upload this avatar — try Save preset first, then copy", true);
+    return;
+  }
   const p = new URLSearchParams();
   p.set("obs", "1");
   if (source.kind === "stream") p.set("src", source.url);
   else p.set("autostart", "1");
-  if (currentVrmUrl && currentVrmUrl !== DEFAULT_VRM) p.set("vrm", currentVrmUrl);
+  if (vrmUrl && vrmUrl !== DEFAULT_VRM) p.set("vrm", vrmUrl);
   if (settings.body) p.set("body", "1");
   p.set("mirror", settings.mirror ? "1" : "0");
   p.set("zoom", view.distance.toFixed(2));
