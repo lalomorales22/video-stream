@@ -1,5 +1,15 @@
 #!/usr/bin/env bash
-# video-stream installer — venv + global `video-stream` command
+# video-stream installer — one script for the whole studio.
+#
+#   ./install.sh              core install, then asks about each add-on
+#   ./install.sh --all        core + pose + avatar + phone, no questions
+#   ./install.sh --core-only  just the rig (lightest install)
+#   ./install.sh --pose --avatar --phone   pick add-ons explicitly
+#
+# Add-ons (each also has its own script, still usable directly):
+#   pose    MediaPipe skeleton overlay + face-aware auto punch-ins
+#   avatar  VTuber avatar studio (vendored three-vrm + face models)
+#   phone   phone-as-camera HTTPS certificate (needs openssl)
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -13,6 +23,23 @@ ok()   { printf '  \033[32m✓\033[0m %s\n' "$*"; }
 warn() { printf '  \033[33m!\033[0m %s\n' "$*"; }
 info() { printf '  → %s\n' "$*"; }
 die()  { printf '\033[31merror:\033[0m %s\n' "$*" >&2; exit 1; }
+
+# ── Add-on selection ───────────────────────────────────
+WANT_POSE=""
+WANT_AVATAR=""
+WANT_PHONE=""
+ASKED=0
+for arg in "$@"; do
+  case "${arg}" in
+    --all)       WANT_POSE=1; WANT_AVATAR=1; WANT_PHONE=1; ASKED=1 ;;
+    --core-only) ASKED=1 ;;
+    --pose)      WANT_POSE=1; ASKED=1 ;;
+    --avatar)    WANT_AVATAR=1; ASKED=1 ;;
+    --phone)     WANT_PHONE=1; ASKED=1 ;;
+    -h|--help)   sed -n '2,12p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *) die "unknown option: ${arg} (try --help)" ;;
+  esac
+done
 
 bold "video-stream · install"
 echo
@@ -129,6 +156,37 @@ case ":${PATH}:" in
     ;;
 esac
 
+# ── Add-ons ────────────────────────────────────────────
+# Interactive runs get asked (Enter = yes → the full studio); flags or
+# non-interactive runs (curl | bash, CI) skip prompts.
+if [[ "${ASKED}" == 0 && -t 0 ]]; then
+  echo
+  bold "Optional add-ons"
+  read -r -p "  Pose tracking — skeleton overlay + face-aware punch-ins? [Y/n] " a || a=""
+  [[ "${a}" =~ ^[Nn] ]] || WANT_POSE=1
+  read -r -p "  Avatar studio — VTuber avatars driven by your face? [Y/n] " a || a=""
+  [[ "${a}" =~ ^[Nn] ]] || WANT_AVATAR=1
+  read -r -p "  Phone as camera — HTTPS cert so phones can join by QR? [Y/n] " a || a=""
+  [[ "${a}" =~ ^[Nn] ]] || WANT_PHONE=1
+elif [[ "${ASKED}" == 0 ]]; then
+  info "non-interactive run: core only (add later with ./install.sh --all)"
+fi
+
+echo
+if [[ -n "${WANT_POSE}" ]]; then
+  bash "${ROOT}/install-pose.sh" || warn "pose add-on failed — re-run ./install-pose.sh later"
+fi
+if [[ -n "${WANT_AVATAR}" ]]; then
+  bash "${ROOT}/install-avatar.sh" || warn "avatar add-on failed — re-run ./install-avatar.sh later"
+fi
+if [[ -n "${WANT_PHONE}" ]]; then
+  if command -v openssl >/dev/null 2>&1; then
+    bash "${ROOT}/install-phone.sh" || warn "phone add-on failed — re-run ./install-phone.sh later"
+  else
+    warn "openssl not found — skipping the phone certificate (install openssl, then ./install-phone.sh)"
+  fi
+fi
+
 # ── Smoke check ────────────────────────────────────────
 # Import every module once so a broken install fails HERE, loudly,
 # instead of at showtime.
@@ -156,12 +214,15 @@ echo "  Extra flags:  video-stream --port 9000 --no-open"
 echo "                video-stream --director --director-rules rules.json"
 echo "                video-stream --director --peers \"studio=<ip>:8765\"   (Rig Link)"
 echo
-echo "  Optional add-ons (each is a one-time install):"
-echo "    ./install-pose.sh     pose skeleton + face-aware auto punch-ins"
-echo "    ./install-avatar.sh   VTuber avatar studio (three-vrm + tracking)"
-echo "    ./install-phone.sh    phone-as-camera (generates the HTTPS cert"
-echo "                          phones need, then scan a QR to go live)"
-echo
+MISSING=""
+[[ -z "${WANT_POSE}" ]] && MISSING="${MISSING}    --pose      skeleton overlay + face-aware auto punch-ins\n"
+[[ -z "${WANT_AVATAR}" ]] && MISSING="${MISSING}    --avatar    VTuber avatar studio (three-vrm + tracking)\n"
+[[ -z "${WANT_PHONE}" ]] && MISSING="${MISSING}    --phone     phone-as-camera HTTPS certificate\n"
+if [[ -n "${MISSING}" ]]; then
+  echo "  Add-ons you skipped (get them anytime with ./install.sh <flag>):"
+  printf "%b" "${MISSING}"
+  echo
+fi
 echo "  OBS browser-source overlays (copy URLs from the dashboard):"
 echo "    /overlay/subtitles  /overlay/hud  /overlay/alerts"
 echo "    /overlay/stinger    /overlay/chat  /overlay/fx"

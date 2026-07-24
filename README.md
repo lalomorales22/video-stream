@@ -70,19 +70,32 @@ Broadcast every local camera over Wi‑Fi. Each stream gets a shareable URL you 
 ```bash
 git clone https://github.com/lalomorales22/video-stream.git
 cd video-stream
-./install.sh
+./install.sh --all      # the whole studio, no questions asked
 ```
 
-That’s it. The installer will:
+**One script installs everything.** Run it bare (`./install.sh`) and it installs the
+core rig, then asks about each add-on — pose tracking, the avatar studio, and
+phone-as-camera — where just pressing Enter says yes to all of them. Flags skip the
+questions: `--all`, `--core-only`, or any mix of `--pose --avatar --phone`. (The
+standalone `install-pose.sh` / `install-avatar.sh` / `install-phone.sh` scripts still
+work too.)
+
+The installer will:
 
 1. Create a project virtualenv (`.venv`)
 2. Install Python dependencies (editable install)
 3. Put a **`video-stream`** command on your PATH at `~/.local/bin/video-stream`
 4. Add `~/.local/bin` to your PATH in `~/.zshrc` / `~/.bashrc` if it isn’t already there
+5. Install the add-ons you chose, then smoke-test that every module imports
 
 If it updated your shell config, open a **new terminal** (or run `source ~/.zshrc`).
 
-Re-run `./install.sh` anytime after pulling updates to refresh the install.
+Re-run `./install.sh` anytime after pulling updates to refresh the install — it's
+idempotent, and a skipped add-on can be added later with its flag.
+
+**Setting up another machine on the rig** (a camera laptop, the OBS box): same three
+lines on each computer. Every machine runs the same app — cameras, avatars, overlays
+and the dashboard everywhere — they just play different roles in the show.
 
 ### Requirements
 
