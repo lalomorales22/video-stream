@@ -22,3 +22,6 @@ video_stream/static/models/
 
 # Avatar Studio gallery (user data)
 video_stream/static/gallery/
+
+# 3D model sources + avatars (33MB+ of FBX/GLB/VRM — keep out of git)
+video_stream/static/3dobjects/
