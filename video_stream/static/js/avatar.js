@@ -375,8 +375,14 @@ function expr(name, value, lerp = 0.4) {
 }
 
 function rigFace(rf) {
-  rigRotation("neck", rf.head, 0.5, 0.35);
-  rigRotation("head", rf.head, 0.5, 0.35);
+  // Nodding was inverted: a positive rotation about a bone's local X pitches it
+  // FORWARD, so Kalidokit's "chin up" drove the head down. Measured identical on
+  // VRM 0.x and 1.0 rigs — normalised humanoid space is spec-independent here,
+  // so this is a flat negation, NOT the spec sign the arms need. Only pitch is
+  // wrong; yaw and roll already read the right way round.
+  const head = { x: -rf.head.x, y: rf.head.y, z: rf.head.z };
+  rigRotation("neck", head, 0.5, 0.35);
+  rigRotation("head", head, 0.5, 0.35);
 
   const eye = Kalidokit.Face.stabilizeBlink(rf.eye, rf.head.y);
   expr("blink", 1 - eye.l, 0.55);
