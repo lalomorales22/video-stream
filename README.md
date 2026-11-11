@@ -32,6 +32,9 @@ Broadcast every local camera over Wi‑Fi. Each stream gets a shareable URL you 
   auto-switches OBS to the active one over its WebSocket API, hands-free
 - [**Avatar / VTuber**](#avatar-vtuber-beta) *(beta)* — drive a rigged 3D avatar with your face
   (head, blinks, mouth) in the browser; renders transparent for OBS
+- [**Moves**](#moves-record-a-performance-replay-it-on-any-avatar) — hit record, act it out, and
+  save it as a reusable animation: replay it on any avatar (and every OBS avatar source) with one
+  click, or export a standard `.vrma` file
 - [**Auto-rig**](#auto-rig-raw-model--drivable-avatar) — drop a raw unrigged `.glb` in and get a
   drivable VRM back about a minute later: skeleton, skin weights, blink and mouth shapes, all
   built on your own machine
@@ -56,14 +59,14 @@ Broadcast every local camera over Wi‑Fi. Each stream gets a shareable URL you 
   director cut — all transparent OBS browser sources with copyable URLs
 - [**Unified chat**](#unified-live-chat-twitch--kick) — Twitch (zero credentials) + Kick chat merged
   server-side, with an on-stream chat overlay
-- [**Setup wizard & settings**](#setup-wizard--runtime-settings) — scan → propose a scene map → verify
-  the rig with a pass/fail checklist; edit everything from the dashboard (secrets masked, optional
-  shared-token auth)
+- [**Setup wizard & settings**](#setup-wizard--runtime-settings) — connect OBS → let the app build a
+  scene per camera → run a check where every failure has a fix button; plain-language settings
+  (secrets masked, optional admin password)
 - [**Rig Link**](#rig-link-multi-machine-directing) — the director on your OBS box reacts to motion on
   cameras plugged into *other* machines: `--peers studio=192.168.1.42:8765` and rules like
   `motion:studio:1` cut on remote movement
-- [**Phone as camera**](#phone-as-camera) — scan a QR and any phone becomes a wireless camera over
-  WebRTC; the view page drops straight into OBS as a Browser Source
+- [**Phone as camera**](#phone-as-camera) — any phone or tablet becomes a real camera on the rig over
+  USB or Wi-Fi, with nothing to install on it: its own card and OBS URL, skeleton, zoom, director input
 - [**Chaos engine**](#chaos-engine-fx--obs-choreography) — one-click fullscreen effects (confetti,
   glitch, matrix…) plus shareable JSON presets that choreograph OBS itself — scene slams, BRB
   sequences, intros — all behind the kill switch
@@ -438,21 +441,44 @@ checks every peer's reachability.
 
 ## Phone as camera
 
-One-time setup: `./install-phone.sh` (generates a self-signed certificate — phones
-only allow camera access on secure pages), then restart. After that:
+Any phone or tablet becomes a **real camera on the rig** — its own card, its own
+`/stream/N` and `/view/N` URLs, and everything a USB webcam gets: the skeleton overlay,
+Smart Zoom, motion scoring for the auto-director, and the avatar's source picker. There
+is nothing to install on the device; it just opens a page in its browser.
 
-1. Click **📱 Add phone** on the dashboard and scan the QR with the phone
-   (same Wi-Fi; accept the certificate warning once, allow the camera).
-2. Copy the **view URL** from the panel into OBS as a **Browser Source** —
-   that page shows the phone's camera full-bleed, live over WebRTC.
+Click **📱 Add phone / tablet** on the dashboard, then either:
 
-Flip between front/back cameras from the phone; the view page reconnects
-automatically, and it no longer matters which side opens first — the phone
-re-offers whenever a receiver joins. Append `?audio=1` to the view URL in OBS
-(with *Control audio via OBS*) to carry the phone's microphone too. Each *Add phone* click mints an independent session, so several
-phones can join as separate sources. Signaling is a tiny in-process relay
-(`/phone-signal`); media flows phone → receiver directly over the LAN (STUN only —
-both devices must share the network).
+- **USB cable (Android)** — plug the device in with USB debugging on and click
+  **Open camera on it**. The app tunnels itself to the device over the cable
+  (`adb reverse`) and opens the camera page there. No Wi-Fi and no certificate needed.
+  Needs `adb` on this computer (`brew install --cask android-platform-tools`).
+- **Wi-Fi (any phone or tablet)** — one-time `./install-phone.sh` (generates a
+  self-signed certificate; browsers only allow the camera on secure pages), restart,
+  then scan the QR. Accept the certificate warning once and allow the camera.
+
+Device cameras are numbered from **100** up, so they never clash with local cameras,
+and a device keeps its number — and its OBS URL — across restarts. On the device you
+can name the camera, flip front/back, and pick 480p / 720p / 1080p. Keep the page open
+and on screen: it *is* the camera.
+
+**Pairing.** The QR / USB link carries a join code that is valid for 15 minutes. A
+device that presents one is given its own secret (kept in that browser; the server
+stores only a SHA-256 of it in `~/.config/video-stream/devices.json`, `chmod 600`) and
+reconnects by itself from then on. Nothing can push video into the rig without one or
+the other. **Remove** on a device's card unpairs it.
+
+Frames travel as JPEG over a WebSocket (about 24 fps at 720p). That is what lets the
+server run computer vision on them; the trade-off is no audio.
+
+<details>
+<summary>Older direct-to-OBS link (WebRTC, carries the phone's microphone)</summary>
+
+`GET /api/phone/session` still mints a session: open its `phone_url` on the phone and
+add its `view_url` to OBS as a Browser Source (append `?audio=1` for the mic). Media
+flows phone → OBS directly, so the server never sees it — no card, no skeleton, no
+director input.
+
+</details>
 
 ## Chaos engine (FX + OBS choreography)
 
@@ -511,19 +537,31 @@ feed, and `GET /api/chat/history` backfills late joiners.
 
 ## Setup wizard & runtime settings
 
-Click **Setup** in the topbar:
+Click **Setup** in the topbar. Three steps, top to bottom:
 
-- **Verify rig** — pass/fail checklist: cameras streaming, OBS reachable, scene map
-  covers live cameras, mapped scenes exist, replay buffer enabled, MediaPipe present.
-  Run it *before* going live, not during.
-- **Propose scene map** — scans your OBS scenes and matches them to cameras
-  (`"Cam 0"`-style names match first, then device-name words); review and apply with
-  one click.
-- **Settings** — every important flag, editable live: OBS connection, director tuning,
-  replay sources, safety caps. Saved to `~/.config/video-stream/settings.json`
-  (`chmod 600`; secrets are write-only and never echoed back). Explicit CLI flags
-  still win at boot. Set `auth_token` to require an `X-Auth-Token` header for future
-  settings changes.
+1. **Connect to OBS** — shows whether OBS is answering, and if not, exactly where to
+   turn it on (*Tools → WebSocket Server Settings*) and a box for the password.
+2. **Give each camera a scene** — **Set up OBS for me** previews, then creates, one
+   scene per camera (`Cam 0`, `Cam 100`, …) holding a **Media Source** of that camera's
+   stream, scaled to fit the canvas, plus an `Overlays (video-stream)` scene (chat,
+   captions, alerts, effects, stinger) nested on top of each. Cameras are Media Sources
+   on purpose: OBS's embedded browser fails to start on some installs (every Browser
+   source stays black), and a camera should not depend on it. The overlays are web
+   pages, so they do need OBS's browser. It only ever *adds*: a camera already linked to one of your
+   own scenes is left alone, nothing is renamed or removed, and running it twice is a
+   no-op. Or pick **Use scenes I already have** to match cameras to existing scenes
+   (`"Cam 0"`-style names match first, then device-name words).
+3. **Check everything** — a pass/fail list (cameras, OBS, scenes, replay buffer,
+   skeleton add-on) where each failure has a button that takes you to the fix. Run it
+   *before* going live, not during.
+
+**All settings** sits underneath, grouped (OBS connection, Auto-director, Replays,
+Safety, More computers, Security) with a plain sentence under every field; scene and
+source fields suggest the names read from OBS. Saved to
+`~/.config/video-stream/settings.json` (`chmod 600`; secrets are write-only and never
+echoed back). Explicit CLI flags still win at boot. Set the **Admin password**
+(`auth_token`) to require an `X-Auth-Token` header for settings changes, adding or
+removing devices, building OBS scenes and rigging.
 
 ## Avatar (VTuber, beta)
 
@@ -599,6 +637,33 @@ Paste that into OBS on any machine.
 - **Runs offline** once installed — libraries are vendored, no CDN at runtime.
 - **Roadmap:** body + hands tracking, high-fidelity face (52 ARKit blendshapes /
   "PerfectSync"), and an AI-persona avatar (LLM + TTS + audio lip-sync). See `path_b.md`.
+
+## Moves (record a performance, replay it on any avatar)
+
+Press **● Record** in the avatar studio, act it out after the 3-second countdown, press
+**■ Stop**. The take loops on the avatar while you drag the **Start** / **End** handles to
+trim off the reach-for-the-button moments, then name it and **Save move**. It lands in
+the **Moves** panel:
+
+- **▶ Play / ↻ Loop** — performs it on *every* open avatar page: the studio tab and each
+  OBS avatar browser source. Live tracking steps aside while a move plays and takes back
+  over when it ends. The dashboard has the same controls in its **Moves** bar, so you can
+  fire a move mid-show without opening the avatar tab.
+- **Export .vrma** — bakes the move onto the loaded avatar and downloads a standard
+  [VRM Animation](https://vrm.dev/en/vrma/) file for other VRM software (checked against
+  the VRM Add-on for Blender's importer).
+- **Rename / Delete**.
+
+A move is the tracker's own output written down with timestamps — head turn, eyes, mouth
+shape, and in **Full body** mode arms, legs and torso — not baked bone rotations. Playback
+runs it through the same retargeting as live tracking, which is why one recording drives a
+VRoid girl and a penguin alike. Quality is whatever the webcam tracker saw: face and upper
+body come out well, legs and fingers are rough. Up to 2 minutes per take; saved under
+`static/gallery/animations/` (gitignored with the rest of the gallery).
+
+For scripts and integrations: `GET /api/avatar/animations`, `POST
+/api/avatar/animations/{id}/play` (`{"loop": true}` optional), `POST
+/api/avatar/animations/stop`.
 
 ## Auto-rig (raw model → drivable avatar)
 
@@ -821,10 +886,12 @@ video-stream/
 │   ├── overlays.py     # captions/alerts/HUD/stinger overlay pack + APIs
 │   ├── chat.py         # unified Twitch + Kick chat aggregator
 │   ├── settings.py     # runtime settings registry + token auth
-│   ├── setup_wizard.py # scan · propose scene map · verify checklist
+│   ├── setup_wizard.py # connect OBS · build scenes · verify checklist
 │   ├── peers.py        # Rig Link: remote motion signals for the director
-│   ├── phone.py        # phone-as-camera signaling + QR + pages
+│   ├── devices.py      # phones/tablets as real cameras: pairing, ingest, USB (adb)
+│   ├── phone.py        # older direct-to-OBS phone link (WebRTC signaling)
 │   ├── chaos.py        # JSON OBS choreography + fx effects engine
+│   ├── animations.py   # recorded avatar moves: storage, play trigger
 │   ├── autorig.py      # auto-rig job queue + API (drives headless Blender)
 │   ├── blender/        # the rigger that runs inside Blender + archetype recipes
 │   ├── obs.py          # minimal OBS WebSocket v5 client + audio meters

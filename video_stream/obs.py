@@ -160,6 +160,75 @@ class OBSClient:
             return []
         return [i["inputName"] for i in resp["responseData"].get("inputs", [])]
 
+    # ── Scene building (used by the setup wizard) ──────────────────────────
+
+    def video_size(self) -> tuple[int, int] | None:
+        """The OBS canvas size, so new sources can fill it exactly."""
+        resp = self._request("GetVideoSettings")
+        if not self._ok(resp):
+            return None
+        data = resp["responseData"]
+        width, height = int(data.get("baseWidth") or 0), int(data.get("baseHeight") or 0)
+        return (width, height) if width and height else None
+
+    def create_scene(self, scene: str) -> bool:
+        return self._ok(self._request("CreateScene", {"sceneName": scene}))
+
+    def create_browser_input(self, scene: str, name: str, url: str, width: int, height: int) -> bool:
+        """Create a Browser source and place it in ``scene``."""
+        return self._ok(
+            self._request(
+                "CreateInput",
+                {
+                    "sceneName": scene,
+                    "inputName": name,
+                    "inputKind": "browser_source",
+                    "inputSettings": {"url": url, "width": width, "height": height},
+                    "sceneItemEnabled": True,
+                },
+            )
+        )
+
+    def create_media_input(self, scene: str, name: str, url: str) -> bool:
+        """Create a Media Source playing a network stream and place it in
+        ``scene``. Cameras use this rather than a Browser source: it does not
+        depend on OBS's embedded browser, which fails to start on some
+        installs and leaves every browser source black."""
+        return self._ok(
+            self._request(
+                "CreateInput",
+                {
+                    "sceneName": scene,
+                    "inputName": name,
+                    "inputKind": "ffmpeg_source",
+                    "inputSettings": {
+                        "is_local_file": False,
+                        "input": url,
+                        "buffering_mb": 0,            # live feed: no added delay
+                        "reconnect_delay_sec": 2,     # camera restarted? come back by itself
+                        "restart_on_activate": False,  # keep playing while off-air
+                        "clear_on_media_end": False,
+                    },
+                    "sceneItemEnabled": True,
+                },
+            )
+        )
+
+    def set_scene_item_index(self, scene: str, item_id: int, index: int) -> bool:
+        """Stacking order within a scene: 0 is the bottom."""
+        return self._ok(
+            self._request(
+                "SetSceneItemIndex",
+                {"sceneName": scene, "sceneItemId": item_id, "sceneItemIndex": index},
+            )
+        )
+
+    def add_to_scene(self, scene: str, source: str) -> bool:
+        """Place an existing source (or another scene) into ``scene``."""
+        return self._ok(
+            self._request("CreateSceneItem", {"sceneName": scene, "sourceName": source})
+        )
+
     # ── Replay buffer / sources (used by video_stream.replay) ─────────────
 
     def replay_buffer_active(self) -> bool | None:

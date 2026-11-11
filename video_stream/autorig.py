@@ -45,6 +45,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 from video_stream import settings as settings_mod
+from video_stream.code27_check import check_code27
 from video_stream.hub import hub
 
 ROOT = Path(__file__).resolve().parent
@@ -61,6 +62,12 @@ RIG_TIMEOUT = 2400.0       # decimate + bind + shape keys + export, on one core
 _KEEP_JOBS = 24            # job history kept in memory (the UI shows recent ones)
 _KEEP_SOURCES = 12         # uploaded models kept on disk (30 MB each adds up)
 _LOG_LINES = 400           # per job, tail-kept
+
+# What a rig is FOR. "avatar" is this studio's own browser avatar: blinks and
+# vowels, the model's own materials. "code27" is the companion device, which
+# plays full-body animation and named emotions and expects VRM's toon shader —
+# so it also gets MToon materials and (where the hands can be found) fingers.
+TARGETS = ("avatar", "code27")
 
 _ctx: dict[str, Any] = {}  # gallery_dir, vrm_dir — wired by app.py
 
@@ -482,6 +489,8 @@ class RigRunner:
             job.step = "done"
             job.progress = 1.0
             job.result = result
+            if job.kind == "rig":
+                result["check"] = _check_result(result)
         else:
             job.state = "failed"
             job.progress = 0.0
@@ -521,6 +530,19 @@ class RigRunner:
 
     def _publish(self) -> None:
         hub.emit("rig", {"jobs": self.jobs(), "busy": bool(self._current)})
+
+
+def _check_result(result: dict[str, Any]) -> dict[str, Any] | None:
+    """Run the Code27 checklist on a freshly rigged VRM. Every rig gets one,
+    whatever it was made for — the checklist is how you find out a rig came out
+    as a statue. A checker that trips over a file must never fail the rig."""
+    path = result.get("vrm_path")
+    if not path:
+        return None
+    try:
+        return check_code27(path)
+    except Exception as exc:  # noqa: BLE001
+        return {"target": "code27", "verdict": "unknown", "items": [], "note": f"check failed: {exc}"[:200]}
 
 
 runner = RigRunner()
@@ -609,6 +631,9 @@ class RigRequest(BaseModel):
     eyes: list[dict[str, float]] | None = None   # optional hand-placed eye centers
     mouth: dict[str, float] | None = None        # optional hand-placed mouth point
     expressions: bool = True
+    target: str = "avatar"           # one of TARGETS
+    mtoon: bool | None = None        # None = whatever the target wants
+    fingers: bool | None = None
 
 
 @router.get("/api/rig")
@@ -743,7 +768,12 @@ async def api_rig_start(body: RigRequest, request: Request):
         source_id = _safe_id(body.source_id)
         if not _source_path(source_id).exists():
             raise RigError("no such source model", 404)
+        if body.target not in TARGETS:
+            raise RigError(f"unknown target '{body.target[:40]}' — use one of {', '.join(TARGETS)}")
         params = {
+            "target": body.target,
+            "mtoon": body.mtoon,
+            "fingers": body.fingers,
             "archetype": body.archetype or "auto",
             "name": (body.name or "Avatar")[:60],
             "height_m": body.height_m,
@@ -775,3 +805,19 @@ async def api_rig_cancel(job_id: str, request: Request):
     if not runner.cancel(job_id):
         raise HTTPException(status_code=404, detail="no such job (or it already finished)")
     return {"ok": True}
+
+
+@router.get("/api/rig/check")
+async def api_rig_check(vrm: str):
+    """The Code27 checklist for any avatar in the gallery — rigged here or
+    uploaded. ``vrm`` is the gallery URL or bare file name; only the name is
+    used, and only inside the gallery's own directory."""
+    name = unquote(vrm).rsplit("/", 1)[-1]
+    stem = name[:-4] if name.lower().endswith(".vrm") else ""
+    if not stem or not all(c.isalnum() or c in "-_" for c in stem) or len(stem) > 64:
+        raise HTTPException(status_code=400, detail="not a gallery avatar")
+    path = _vrm_dir() / name
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="no such avatar")
+    # Parsing a 60 MB file is a moment of CPU — keep it off the event loop.
+    return await asyncio.to_thread(check_code27, path)

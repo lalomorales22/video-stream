@@ -45,7 +45,7 @@
           <button type="button" class="view-tab" id="tab-avatar" role="tab" aria-selected="false" title="VTuber avatar studio — drive a 3D avatar with your face">Avatar</button>
         </div>
         <a class="btn btn-ghost btn-pop" href="/avatar" target="_blank" rel="noopener" title="Open the avatar studio in its own browser tab (for a second monitor)">↗</a>
-        <button type="button" class="btn btn-ghost" id="btn-setup" aria-pressed="false" title="Rig setup: scan, propose a scene map, verify, edit settings">
+        <button type="button" class="btn btn-ghost" id="btn-setup" aria-pressed="false" title="Connect OBS, build scenes, check everything, change settings">
           Setup
         </button>
         <button type="button" class="btn btn-ghost" id="btn-refresh" title="Re-scan cameras">
@@ -81,17 +81,70 @@
     <section class="panel setup-panel hidden" id="setup-panel">
       <div class="setup-head">
         <div>
-          <span class="eyebrow">Rig setup</span>
-          <h2>Scan · propose · verify</h2>
-        </div>
-        <div class="setup-actions">
-          <button type="button" class="btn btn-sm" id="btn-verify">Verify rig</button>
-          <button type="button" class="btn btn-sm" id="btn-generate">Propose scene map</button>
+          <span class="eyebrow">Setup</span>
+          <h2>Get your studio ready</h2>
+          <p class="muted setup-lede">Three steps, top to bottom. Your cameras and their OBS links already work without any of this — these steps add the automatic parts.</p>
         </div>
       </div>
-      <div class="setup-checklist" id="setup-checklist"></div>
-      <div class="setup-proposal hidden" id="setup-proposal"></div>
-      <form class="setup-settings" id="setup-settings" autocomplete="off"></form>
+
+      <ol class="setup-steps">
+        <li class="setup-step" id="step-obs">
+          <div class="step-head">
+            <span class="step-num">1</span>
+            <h3>Connect to OBS</h3>
+            <span class="step-state" id="obs-state">not checked</span>
+          </div>
+          <p class="muted">Lets this app switch scenes, save replays and build scenes for you.</p>
+          <div class="step-help hidden" id="obs-help">
+            In OBS, open <strong>Tools → WebSocket Server Settings</strong>, tick
+            <strong>Enable WebSocket server</strong>, then click <strong>Show Connect Info</strong>
+            and paste the password here.
+          </div>
+          <div class="step-row">
+            <input type="password" id="obs-password" class="studio-input" placeholder="OBS password (leave empty if already saved)" autocomplete="off" aria-label="OBS WebSocket password" />
+            <button type="button" class="btn btn-sm btn-signal" id="btn-obs-test">Connect</button>
+          </div>
+        </li>
+
+        <li class="setup-step" id="step-build">
+          <div class="step-head">
+            <span class="step-num">2</span>
+            <h3>Give each camera a scene</h3>
+            <span class="step-state" id="build-state"></span>
+          </div>
+          <p class="muted">The auto-director switches between scenes, so each camera needs one. Let the app make them, or point it at scenes you already built.</p>
+          <div class="step-row">
+            <button type="button" class="btn btn-sm btn-signal" id="btn-obs-plan">Set up OBS for me</button>
+            <button type="button" class="btn btn-sm" id="btn-generate">Use scenes I already have</button>
+            <label class="toggle" title="Adds captions, chat, alerts and effects on top of every camera scene">
+              <input type="checkbox" id="build-overlays" checked />
+              <span>Include overlays</span>
+            </label>
+          </div>
+          <div class="setup-plan hidden" id="obs-plan"></div>
+          <div class="setup-proposal hidden" id="setup-proposal"></div>
+        </li>
+
+        <li class="setup-step" id="step-verify">
+          <div class="step-head">
+            <span class="step-num">3</span>
+            <h3>Check everything</h3>
+            <span class="step-state" id="verify-state"></span>
+          </div>
+          <p class="muted">Run this before you go live. Anything that fails gets a button that fixes it.</p>
+          <div class="step-row">
+            <button type="button" class="btn btn-sm btn-signal" id="btn-verify">Run the check</button>
+          </div>
+          <div class="setup-checklist" id="setup-checklist"></div>
+        </li>
+      </ol>
+
+      <details class="setup-advanced" id="setup-advanced">
+        <summary>All settings</summary>
+        <form class="setup-settings" id="setup-settings" autocomplete="off"></form>
+      </details>
+      <datalist id="obs-scenes"></datalist>
+      <datalist id="obs-inputs"></datalist>
     </section>
 
     <section class="toolbar">
@@ -136,14 +189,21 @@
         <button type="button" class="btn btn-sm" id="btn-alert-test" title="Fire a test alert on the alerts overlay">Test alert</button>
       </div>
       <div class="studio-group">
-        <span class="studio-label">Phone</span>
-        <button type="button" class="btn btn-sm" id="btn-phone" title="Turn a phone into a wireless camera — scan a QR, no install">📱 Add phone</button>
+        <span class="studio-label">Devices</span>
+        <button type="button" class="btn btn-sm" id="btn-phone" title="Turn a phone or tablet into a camera — over USB or Wi-Fi, nothing to install on it">📱 Add phone / tablet</button>
       </div>
       <div class="studio-group">
         <span class="studio-label">FX</span>
         <span id="fx-buttons"></span>
         <select id="chaos-select" class="studio-input chaos-select" title="Chaos presets from presets/chaos/"></select>
         <button type="button" class="btn btn-sm" id="btn-chaos-run">Run</button>
+      </div>
+      <div class="studio-group" id="moves-group">
+        <span class="studio-label">Moves</span>
+        <select id="moves-select" class="studio-input chaos-select" title="Moves recorded in the Avatar tab — they play on every avatar, including your OBS avatar sources"></select>
+        <button type="button" class="btn btn-sm" id="btn-move-play" title="Play this move once on every avatar">▶ Play</button>
+        <button type="button" class="btn btn-sm" id="btn-move-loop" title="Keep repeating it until you press Stop">↻ Loop</button>
+        <button type="button" class="btn btn-sm" id="btn-move-stop" title="Stop the move and go back to live tracking">■ Stop</button>
       </div>
       <div class="studio-group" id="chat-group">
         <span class="studio-label">Chat</span>
@@ -156,19 +216,12 @@
 
     <section class="panel phone-panel hidden" id="phone-panel">
       <div class="phone-grid">
-        <img id="phone-qr" alt="Scan to turn your phone into a camera" width="222" height="222" />
+        <img id="phone-qr" alt="Scan to turn this device into a camera" width="222" height="222" />
         <div class="phone-info">
-          <span class="eyebrow">Phone camera</span>
-          <h2 id="phone-title">Scan with your phone (same Wi-Fi)</h2>
-          <p class="muted" id="phone-hint">
-            Your phone will warn about the self-signed certificate once — tap
-            Advanced → Proceed. Then allow the camera, and add the view URL
-            below as an OBS Browser Source.
-          </p>
-          <div class="url-box">
-            <code id="phone-view-url" title="Click to copy"></code>
-            <button type="button" class="btn btn-copy" id="btn-phone-copy">Copy</button>
-          </div>
+          <span class="eyebrow">Add a phone or tablet</span>
+          <h2 id="phone-title">Turn any phone or tablet into a camera</h2>
+          <p class="muted" id="phone-hint"></p>
+          <div class="device-usb" id="device-usb"></div>
           <span class="muted mono" id="phone-status"></span>
         </div>
       </div>
@@ -178,7 +231,7 @@
       <div class="empty-state" id="empty-state">
         <div class="empty-icon" aria-hidden="true">◎</div>
         <h3>Looking for cameras…</h3>
-        <p>Grant camera access if prompted. Plug in a USB cam and hit Rescan.</p>
+        <p>Grant camera access if prompted. Plug in a USB cam and hit Rescan — or use <strong>Add phone / tablet</strong> to make any phone a camera.</p>
       </div>
     </main>
     </div>

@@ -1,0 +1,313 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no" />
+  <meta name="referrer" content="no-referrer" />
+  <title>video-stream · camera</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { height: 100%; background: #070708; color: #ececf1; font-family: -apple-system, "Segoe UI", Roboto, sans-serif; overflow: hidden; }
+    #preview { position: fixed; inset: 0; width: 100%; height: 100%; object-fit: cover; background: #000; }
+    #top {
+      position: fixed; left: 0; right: 0; top: 0;
+      padding: calc(12px + env(safe-area-inset-top)) 14px 22px;
+      background: linear-gradient(180deg, rgba(0,0,0,.7), transparent);
+      display: flex; align-items: center; justify-content: space-between; gap: 10px;
+    }
+    #status { font-size: 15px; font-weight: 700; display: flex; align-items: center; gap: 8px; text-shadow: 0 1px 4px rgba(0,0,0,.8); }
+    #status .dot { width: 10px; height: 10px; border-radius: 50%; background: #f5a623; flex: none; }
+    #status.live .dot { background: #ff3d6e; animation: pulse 1.4s ease infinite; }
+    #status.live { color: #fff; }
+    #meter { font-size: 12px; color: rgba(255,255,255,.8); font-variant-numeric: tabular-nums; text-shadow: 0 1px 4px rgba(0,0,0,.8); }
+    #bottom {
+      position: fixed; left: 0; right: 0; bottom: 0;
+      padding: 26px 14px calc(14px + env(safe-area-inset-bottom));
+      background: linear-gradient(0deg, rgba(0,0,0,.8), transparent);
+      display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
+    }
+    #name {
+      flex: 1 1 140px; min-width: 0;
+      border: 1px solid rgba(255,255,255,.25); background: rgba(0,0,0,.45); color: #fff;
+      border-radius: 999px; padding: 11px 16px; font-size: 15px;
+    }
+    .btn, select {
+      border: 1px solid rgba(255,255,255,.25); background: rgba(0,0,0,.45); color: #fff;
+      border-radius: 999px; padding: 11px 16px; font-size: 14px; font-weight: 600;
+      -webkit-appearance: none; appearance: none;
+    }
+    #hint { flex-basis: 100%; font-size: 12px; color: rgba(255,255,255,.7); }
+    .hidden { display: none !important; }
+    #card { position: fixed; inset: 0; display: grid; place-items: center; padding: 24px; background: #070708; text-align: center; }
+    #card h1 { font-size: 22px; font-weight: 800; margin-bottom: 10px; }
+    #card p { color: rgba(255,255,255,.72); font-size: 15px; line-height: 1.5; max-width: 34ch; margin: 0 auto 18px; }
+    @keyframes pulse { 50% { opacity: .45; } }
+  </style>
+</head>
+<body>
+  <video id="preview" autoplay playsinline muted></video>
+
+  <div id="card">
+    <div>
+      <h1 id="card-title">Starting camera…</h1>
+      <p id="card-text">Allow camera access when prompted.</p>
+      <button type="button" class="btn hidden" id="btn-retry">Try again</button>
+    </div>
+  </div>
+
+  <div id="top" class="hidden">
+    <div id="status"><span class="dot"></span><span id="status-text">Connecting…</span></div>
+    <div id="meter"></div>
+  </div>
+
+  <div id="bottom" class="hidden">
+    <input id="name" type="text" maxlength="40" autocomplete="off" autocapitalize="words" spellcheck="false" aria-label="Camera name" />
+    <select id="size" aria-label="Picture size">
+      <option value="480">480p</option>
+      <option value="720" selected>720p</option>
+      <option value="1080">1080p</option>
+    </select>
+    <button type="button" class="btn" id="btn-flip">↺ Flip</button>
+    <div id="hint">Keep this page open and on screen — it is the camera.</div>
+  </div>
+
+  <script>
+    (() => {
+      const $ = (id) => document.getElementById(id);
+      const preview = $("preview"), card = $("card"), top = $("top"), bottom = $("bottom");
+      const statusEl = $("status"), statusText = $("status-text"), meter = $("meter");
+      const nameInput = $("name"), sizeSel = $("size");
+
+      // localStorage can be blocked (private tabs); fall back to memory so the
+      // camera still works for this visit.
+      const mem = {};
+      const store = {
+        get(k) { try { return localStorage.getItem(k) ?? mem[k] ?? null; } catch { return mem[k] ?? null; } },
+        set(k, v) { mem[k] = v; try { localStorage.setItem(k, v); } catch {} },
+        del(k) { delete mem[k]; try { localStorage.removeItem(k); } catch {} },
+      };
+
+      function randomId() {
+        const bytes = new Uint8Array(12);
+        crypto.getRandomValues(bytes);
+        return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+      }
+
+      const params = new URLSearchParams(location.search);
+      const join = params.get("join") || "";
+      // The join token is one-time-use for pairing; don't leave it in the
+      // address bar / history once we've read it.
+      if (join) { try { history.replaceState(null, "", location.pathname); } catch {} }
+
+      let deviceId = store.get("vs-cam-id");
+      if (!deviceId) { deviceId = randomId(); store.set("vs-cam-id", deviceId); }
+      // A name suggested by the dashboard (the USB flow knows the real model).
+      const suggested = (params.get("name") || "").replace(/[^A-Za-z0-9 _-]/g, "").trim().slice(0, 40);
+      function guessName() {
+        if (suggested) return suggested;
+        const m = navigator.userAgent.match(/Android [\d.]+; ([^;)]+)/);
+        // Chrome reports every Android model as "K" now — not worth showing.
+        if (m && m[1].trim().length > 2) return m[1].replace(/ Build.*$/, "").trim().slice(0, 40);
+        if (/Android/.test(navigator.userAgent)) return /Mobile/.test(navigator.userAgent) ? "Android phone" : "Android tablet";
+        if (/iPad/.test(navigator.userAgent)) return "iPad";
+        if (/iPhone/.test(navigator.userAgent)) return "iPhone";
+        return "Phone";
+      }
+      // A stored one-letter name is the old "K" guess, not something typed.
+      const savedName = store.get("vs-cam-name") || "";
+      nameInput.value = savedName.length > 2 ? savedName : guessName();
+      sizeSel.value = store.get("vs-cam-size") || "720";
+
+      let facing = store.get("vs-cam-facing") || "environment";
+      let stream = null, ws = null, ready = false, closing = false, wsDelay = 600;
+      let sending = false, loopTimer = null, sent = 0, sentAt = performance.now(), kbps = 0, bytesSent = 0;
+      const canvas = document.createElement("canvas");
+      const ctx = canvas.getContext("2d", { alpha: false });
+      const TARGET_FPS = 24;
+      const MAX_BUFFERED = 1.5 * 1024 * 1024; // skip frames rather than build latency
+
+      function showCard(title, text, retry) {
+        card.classList.remove("hidden"); top.classList.add("hidden"); bottom.classList.add("hidden");
+        $("card-title").textContent = title; $("card-text").textContent = text;
+        $("btn-retry").classList.toggle("hidden", !retry);
+      }
+      function showLive(live, text) {
+        card.classList.add("hidden"); top.classList.remove("hidden"); bottom.classList.remove("hidden");
+        statusEl.classList.toggle("live", live); statusText.textContent = text;
+      }
+
+      function sendFrame() {
+        if (sending || !ready || !ws || ws.readyState !== WebSocket.OPEN) return;
+        if (!preview.videoWidth || document.hidden) return;
+        if (ws.bufferedAmount > MAX_BUFFERED) return;
+        const targetH = Number(sizeSel.value) || 720;
+        // "720p" means the short side, so portrait and landscape both make sense.
+        const scale = Math.min(1, targetH / Math.min(preview.videoWidth, preview.videoHeight));
+        const w = Math.round(preview.videoWidth * scale / 2) * 2;
+        const h = Math.round(preview.videoHeight * scale / 2) * 2;
+        if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
+        ctx.drawImage(preview, 0, 0, w, h);
+        sending = true;
+        canvas.toBlob((blob) => {
+          sending = false;
+          if (!blob || !ready || !ws || ws.readyState !== WebSocket.OPEN) return;
+          ws.send(blob);
+          sent += 1; bytesSent += blob.size;
+        }, "image/jpeg", 0.72);
+      }
+
+      function startLoop() {
+        clearInterval(loopTimer);
+        loopTimer = setInterval(sendFrame, 1000 / TARGET_FPS);
+      }
+
+      setInterval(() => {
+        const now = performance.now(), dt = (now - sentAt) / 1000;
+        if (dt <= 0) return;
+        const fps = sent / dt; kbps = (bytesSent * 8) / 1000 / dt;
+        sent = 0; bytesSent = 0; sentAt = now;
+        meter.textContent = ready ? `${fps.toFixed(0)} fps · ${(kbps / 1000).toFixed(1)} Mbps` : "";
+      }, 2000);
+
+      function connect() {
+        const proto = location.protocol === "https:" ? "wss" : "ws";
+        const sock = new WebSocket(`${proto}://${location.host}/cam-ingest`);
+        ws = sock; ready = false;
+        sock.onopen = () => {
+          wsDelay = 600;
+          sock.send(JSON.stringify({
+            id: deviceId,
+            name: nameInput.value,
+            secret: store.get("vs-cam-secret") || "",
+            join,
+          }));
+        };
+        sock.onmessage = (event) => {
+          if (typeof event.data !== "string") return;
+          let msg; try { msg = JSON.parse(event.data); } catch { return; }
+          if (msg.type === "paired" && msg.secret) store.set("vs-cam-secret", msg.secret);
+          else if (msg.type === "ready") {
+            ready = true;
+            showLive(true, `LIVE · camera ${msg.index}`);
+            navigator.wakeLock?.request("screen").catch(() => {});
+          }
+        };
+        sock.onclose = (event) => {
+          if (sock !== ws) return;
+          ready = false;
+          if (closing) return;
+          if (event.code === 4401) {
+            store.del("vs-cam-secret");
+            showCard("Not paired with this rig", "Open Add device on the video-stream dashboard and scan the code (or use the USB button) again.", false);
+            return;
+          }
+          if (event.code === 4403) {
+            store.del("vs-cam-secret");
+            showCard("Removed from the rig", "This device was removed on the dashboard. Add it again to keep using it as a camera.", false);
+            return;
+          }
+          if (event.code === 4408) {
+            release();
+            showCard("Opened somewhere else", "This device's camera page is open in another tab, which took over.", true);
+            return;
+          }
+          if (event.code === 4409) {
+            showCard("Rig is full", event.reason || "Too many paired devices.", false);
+            return;
+          }
+          showLive(false, "Reconnecting…");
+          setTimeout(() => { if (!closing) connect(); }, wsDelay);
+          wsDelay = Math.min(5000, wsDelay + 600);
+        };
+        sock.onerror = () => { try { sock.close(); } catch {} };
+      }
+
+      // Let go of the camera and the connection. Android gives the camera to
+      // one page at a time, so a page that is not on screen must release it —
+      // otherwise a second tab (or a reopened one) gets a black, frozen feed.
+      function release() {
+        closing = true;
+        clearInterval(loopTimer);
+        try { ws?.close(); } catch {}
+        stream?.getTracks().forEach((t) => t.stop());
+        preview.srcObject = null;
+        ws = null; stream = null; ready = false;
+      }
+
+      let generation = 0;
+      async function start() {
+        const mine = ++generation;
+        release();
+        closing = false;
+        if (document.hidden) return; // start() runs again when the page is shown
+
+        if (!navigator.mediaDevices?.getUserMedia) {
+          showCard("Secure connection required", "Browsers only allow the camera on secure pages. Use the QR code or the USB button on the dashboard instead of typing the address.", false);
+          return;
+        }
+        showCard("Starting camera…", "Allow camera access when prompted.", false);
+        try {
+          stream = await navigator.mediaDevices.getUserMedia({
+            video: { facingMode: facing, width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 30 } },
+            audio: false,
+          });
+        } catch (e) {
+          const denied = /NotAllowed/i.test(e.name || "");
+          showCard("Camera unavailable", denied ? "Camera permission was denied — allow it for this page and try again." : `Camera unavailable: ${e.message || e.name}`, true);
+          return;
+        }
+        if (mine !== generation || document.hidden) {
+          // superseded (flip pressed twice) or hidden while the prompt was up
+          stream.getTracks().forEach((t) => t.stop());
+          if (mine === generation) stream = null;
+          return;
+        }
+        preview.srcObject = stream;
+        preview.play().catch(() => {}); // not awaited: it can stall with no frames yet
+        showLive(false, "Connecting to your rig…");
+        connect();
+        startLoop();
+      }
+
+      $("btn-flip").addEventListener("click", () => {
+        facing = facing === "environment" ? "user" : "environment";
+        store.set("vs-cam-facing", facing);
+        start();
+      });
+      $("btn-retry").addEventListener("click", start);
+      sizeSel.addEventListener("change", () => store.set("vs-cam-size", sizeSel.value));
+      nameInput.addEventListener("change", () => {
+        const name = nameInput.value.trim().slice(0, 40) || guessName();
+        nameInput.value = name;
+        store.set("vs-cam-name", name);
+        if (ready && ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "name", name }));
+      });
+      document.addEventListener("visibilitychange", () => {
+        if (document.hidden) {
+          generation += 1; // cancel a start() that is mid-permission-prompt
+          release();
+          showCard("Camera paused", "This page only films while it is on screen. Come back to it and it carries on by itself.", false);
+        } else {
+          start();
+        }
+      });
+
+      // One camera page per device: a newly opened one tells older tabs to
+      // stand down (and close themselves where the browser allows it).
+      try {
+        const channel = new BroadcastChannel("vs-cam");
+        channel.onmessage = (event) => {
+          if (event.data !== "takeover") return;
+          generation += 1;
+          release();
+          showCard("Opened in another tab", "The camera moved to the newer tab. You can close this one.", true);
+          try { window.close(); } catch {}
+        };
+        channel.postMessage("takeover");
+      } catch {}
+
+      start();
+    })();
+  </script>
+</body>
+</html>

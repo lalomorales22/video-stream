@@ -18,6 +18,7 @@ import { GLTFLoader } from "/static/vendor/jsm/loaders/GLTFLoader.js";
 import { VRMLoaderPlugin, VRMUtils } from "/static/vendor/three-vrm.module.js";
 import * as Kalidokit from "/static/vendor/kalidokit.es.js";
 import { FaceLandmarker, PoseLandmarker, FilesetResolver } from "/static/vendor/mediapipe/vision_bundle.mjs";
+import { buildVrma, HUMANOID_ORDER, nearestParent } from "/static/js/vrma.js";
 
 // Cache-busted by the static-tree mtime token: swapping avatar.vrm on disk
 // changes the URL, so browsers and OBS fetch the new model instead of the
@@ -49,6 +50,11 @@ const els = {
   btnRig: document.getElementById("btn-rig"),
   rig: document.getElementById("rig"),
   rigClose: document.getElementById("rig-close"),
+  btnRec: document.getElementById("btn-rec"),
+  btnMoves: document.getElementById("btn-moves"),
+  moves: document.getElementById("moves"),
+  movesList: document.getElementById("moves-list"),
+  movesClose: document.getElementById("moves-close"),
 };
 
 // ── URL config ────────────────────────────────────────────────────────
@@ -506,6 +512,115 @@ if (follow && window.Bus) {
   });
 }
 
+// ── Moves: record a performance, replay it on any avatar ─────────────
+// A move is the same solved rig stream Avatar Sync broadcasts, written down
+// with timestamps. Playback feeds the frames back through rigFace/rigPose —
+// the exact path live tracking takes — so one recording drives every avatar,
+// VRM 0.x or 1.0, and the built-in lerp gives the same smoothing as live.
+const REC_MAX_SECONDS = 120;
+const rec = { state: "idle", frames: [], t0: 0, last: 0, timer: null, take: null };
+const player = { clip: null, t0: 0, i: 0, loop: false, from: 0, to: 0 };
+const clipCache = new Map();
+
+function authHeaders(extra = {}) {
+  const headers = { ...extra };
+  try {
+    const token = localStorage.getItem("vs-token"); // set on the dashboard's Setup panel
+    if (token) headers["X-Auth-Token"] = token;
+  } catch {}
+  return headers;
+}
+
+function recordFrame(now, rf, rp) {
+  if (rec.state !== "recording" || now - rec.last < 30) return; // ~30 frames a second
+  rec.last = now;
+  rec.frames.push({ t: (now - rec.t0) / 1000, f: slimFace(rf), p: rp ? slimPose(rp) : null });
+  if ((now - rec.t0) / 1000 >= REC_MAX_SECONDS) stopRecording();
+}
+
+// Bones a clip may have moved that nothing else will put back.
+const BODY_BONES = [
+  "hips", "spine", "chest",
+  "leftUpperArm", "leftLowerArm", "rightUpperArm", "rightLowerArm",
+  "leftUpperLeg", "leftLowerLeg", "rightUpperLeg", "rightLowerLeg",
+];
+
+function settleBody() {
+  // Live body tracking will take the limbs back over by itself; without it,
+  // return them to the arms-down rest pose instead of freezing mid-gesture.
+  if (!currentVrm) return;
+  const bone = (name) => currentVrm.humanoid?.getNormalizedBoneNode(name);
+  // With no face being tracked the head would stay cocked at the last frame.
+  if (!settings.tracking && !follow) bone("head")?.quaternion.identity();
+  if ((settings.tracking && settings.body) || (follow && followRig?.p)) return;
+  for (const name of BODY_BONES) bone(name)?.quaternion.identity();
+  applyRestPose(currentVrm);
+}
+
+function playClip(clip, { loop = false, from = 0, to = null } = {}) {
+  if (!clip?.frames?.length) return;
+  player.clip = clip;
+  player.loop = loop;
+  player.from = Math.max(0, from);
+  player.to = to == null ? clip.frames[clip.frames.length - 1].t : to;
+  player.t0 = performance.now();
+  player.i = 0;
+  onPlayerChange();
+}
+
+function stopClip() {
+  if (!player.clip) return;
+  player.clip = null;
+  settleBody();
+  onPlayerChange();
+}
+
+// The frame to perform right now, or null when nothing is playing.
+function playerFrame(now) {
+  const clip = player.clip;
+  if (!clip) return null;
+  let t = player.from + (now - player.t0) / 1000;
+  if (t >= player.to) {
+    if (!player.loop) {
+      stopClip();
+      return null;
+    }
+    player.t0 = now;
+    player.i = 0;
+    t = player.from;
+  }
+  const frames = clip.frames;
+  while (player.i + 1 < frames.length && frames[player.i + 1].t <= t) player.i++;
+  return frames[player.i];
+}
+
+async function fetchClip(id) {
+  if (clipCache.has(id)) return clipCache.get(id);
+  const res = await fetch(`/api/avatar/animations/${encodeURIComponent(id)}`);
+  if (!res.ok) throw new Error("that move no longer exists");
+  const clip = await res.json();
+  clipCache.set(id, clip);
+  return clip;
+}
+
+// Every avatar page performs a triggered move — the studio tab and each OBS
+// browser source alike — so an emote needs no tracker page open at all.
+if (window.Bus) {
+  Bus.on("avatar_play", async (msg) => {
+    if (!msg?.id || rec.state === "recording") return;
+    try {
+      playClip(await fetchClip(msg.id), { loop: !!msg.loop });
+    } catch (err) {
+      setStatus(String(err?.message || err), true, true);
+    }
+  });
+  Bus.on("avatar_stop", () => stopClip());
+  Bus.on("avatar_animations", (msg) => {
+    if (msg?.changed) clipCache.delete(msg.changed);
+    if (!els.moves.classList.contains("hidden")) renderMoves();
+  });
+}
+
 // ── main loop ─────────────────────────────────────────────────────────
 const clock = new THREE.Clock();
 let lastWebcamTime = -1;
@@ -544,7 +659,7 @@ function animate() {
             smoothBlink: true,
           });
           if (rf) {
-            rigFace(rf);
+            if (!player.clip) rigFace(rf); // a playing move has the avatar
             lastFaceAt = now;
             sentFace = rf;
           }
@@ -561,11 +676,12 @@ function animate() {
               enableLegs: true,
             });
             if (rp) {
-              rigPose(rp);
+              if (!player.clip) rigPose(rp);
               sentPose = rp;
             }
           }
         }
+        if (sentFace) recordFrame(now, sentFace, sentPose);
         // Avatar Sync driver: broadcast the solved pose so OBS followers on
         // other machines mirror this page exactly (~30Hz, <1KB).
         if (sentFace && !follow && window.Bus && now - lastSyncSent > 33) {
@@ -588,7 +704,13 @@ function animate() {
   // Avatar Sync follower: mirror the driver page's latest pose. Reapplying
   // each frame lets rigFace/rigPose's lerp glide between network updates;
   // if the driver goes quiet the idle takes over naturally.
-  if (follow && followRig && performance.now() - followAt < 1500) {
+  // A recorded move, when one is playing, outranks live tracking and follow.
+  const moveFrame = playerFrame(performance.now());
+  if (moveFrame) {
+    rigFace(moveFrame.f);
+    if (moveFrame.p) rigPose(moveFrame.p);
+    lastFaceAt = performance.now();
+  } else if (follow && followRig && performance.now() - followAt < 1500) {
     rigFace(followRig.f);
     if (followRig.p) rigPose(followRig.p);
     lastFaceAt = performance.now();
@@ -865,7 +987,8 @@ async function renderGallery() {
 }
 
 els.btnGallery.addEventListener("click", () => {
-  els.rig?.classList.add("hidden"); // both slide in from the right edge
+  els.rig?.classList.add("hidden"); // all three slide in from the right edge
+  els.moves.classList.add("hidden");
   els.gallery.classList.toggle("hidden");
   if (!els.gallery.classList.contains("hidden")) renderGallery();
 });
@@ -915,11 +1038,54 @@ const rig = {
   archetype: null,  // the kind of creature, once chosen
   eyes: [],         // hand-placed eye centres, normalised to the head shot
   mouth: null,
+  target: "avatar", // what the rig is for: this studio's avatar, or a Code27
+  faceFront: true,  // false once the user says the front/back guess was wrong
   job: null,        // the running (or finished) job snapshot
   busy: false,
 };
 
 const KIND_HINT = "Pick what it is — that decides where the bones go.";
+
+// What the finished avatar is for. The rig is the same; the extras differ.
+const RIG_TARGETS = [
+  {
+    id: "avatar",
+    label: "This studio",
+    hint: "For the avatar here and in OBS. Keeps the model's own materials.",
+  },
+  {
+    id: "code27",
+    label: "Code27",
+    hint:
+      "For a Code27 companion device. Switches to VRM's toon shader (MToon) and adds finger bones where the hands can be found, so its animations and gestures have something to move.",
+  },
+];
+const CHECK_ICON = { pass: "✓", warn: "!", fail: "✕", info: "·" };
+
+// The Code27 checklist the server ran on the finished file. It mirrors what
+// Code27 publishes about custom characters; the device's own import check is
+// the final word, and the note under the list says so.
+function rigCheckHtml(check) {
+  if (!check || !Array.isArray(check.items) || !check.items.length) return "";
+  const c = check.counts || {};
+  const verdict =
+    check.verdict === "fail"
+      ? `<span class="rig-verdict fail">${c.fail} problem${c.fail === 1 ? "" : "s"}</span>`
+      : check.verdict === "warn"
+        ? `<span class="rig-verdict warn">${c.warn} to know about</span>`
+        : `<span class="rig-verdict pass">nothing missing</span>`;
+  const rows = check.items
+    .map(
+      (i) =>
+        `<li class="${escapeHtml(i.level)}"><i>${CHECK_ICON[i.level] || "·"}</i>` +
+        `<div><b>${escapeHtml(i.title)}</b><span>${escapeHtml(i.detail)}</span></div></li>`
+    )
+    .join("");
+  return (
+    `<div class="rig-check"><h4>Code27 checklist ${verdict}</h4><ul>${rows}</ul>` +
+    `<p class="muted">${escapeHtml(check.note || "")}</p></div>`
+  );
+}
 
 function rigSet(html) {
   document.getElementById("rig-body").innerHTML = html;
@@ -1032,6 +1198,7 @@ async function rigUpload(file) {
     rig.analysis = null;
     rig.eyes = [];
     rig.mouth = null;
+    rig.faceFront = true;
     await rigStart("analyze", { source_id: rig.source.id });
   } catch (err) {
     rig.busy = false;
@@ -1151,6 +1318,8 @@ function rigRenderSetup() {
     `<div class="rig-shots"><img src="${a.previews.front}" alt="front"><img src="${a.previews.side}" alt="side"></div>` +
       `<p class="muted">Turned ${turned}° to face front${turned ? "" : " (it already did)"} · ` +
       `${a.measure.tris.toLocaleString()} triangles after simplifying</p>` +
+      `<p class="rig-row"><button id="rig-flip" type="button" title="The first picture should show its face. If it shows its back, press this.">` +
+      `Showing its back? Turn it round</button></p>` +
       `<div><h4>What is it?</h4><div class="rig-kinds">${kinds}</div>` +
       `<ul class="rig-why">${(a.reasons || []).map((r) => `<li>${escapeHtml(r)}</li>`).join("")}</ul>` +
       `<p class="muted" id="rig-kind-desc">${escapeHtml(chosen ? chosen.description : KIND_HINT)}</p></div>` +
@@ -1160,6 +1329,14 @@ function rigRenderSetup() {
       `<div class="rig-face" id="rig-face"><img id="rig-face-img" src="${a.previews.head}" alt="head"></div>` +
       `<p class="rig-row" style="margin-top:8px"><button id="rig-face-reset" type="button">Clear marks</button>` +
       `<span class="muted" id="rig-face-state"></span></p></div>` +
+      `<hr>` +
+      `<div><h4>Made for</h4><div class="rig-kinds">${RIG_TARGETS.map(
+        (t) =>
+          `<button class="rig-kind${t.id === rig.target ? " on" : ""}" data-target="${t.id}" type="button">${escapeHtml(t.label)}</button>`
+      ).join("")}</div>` +
+      `<p class="muted" id="rig-target-desc" style="margin-top:8px">${escapeHtml(
+        (RIG_TARGETS.find((t) => t.id === rig.target) || RIG_TARGETS[0]).hint
+      )}</p></div>` +
       `<hr>` +
       `<div><h4>Details</h4>` +
       `<p class="rig-row"><input id="rig-name" type="text" placeholder="Name" value="${escapeHtml(
@@ -1171,12 +1348,20 @@ function rigRenderSetup() {
       `<button id="rig-restart" type="button">Different file</button></div>`
   );
 
-  document.querySelectorAll(".rig-kind").forEach((btn) =>
+  document.querySelectorAll(".rig-kind[data-kind]").forEach((btn) =>
     btn.addEventListener("click", () => {
       rig.archetype = btn.dataset.kind;
-      document.querySelectorAll(".rig-kind").forEach((b) => b.classList.toggle("on", b === btn));
+      document.querySelectorAll(".rig-kind[data-kind]").forEach((b) => b.classList.toggle("on", b === btn));
       const k = (rig.status.archetypes || []).find((x) => x.id === rig.archetype);
       document.getElementById("rig-kind-desc").textContent = k ? k.description : KIND_HINT;
+    })
+  );
+  document.querySelectorAll(".rig-kind[data-target]").forEach((btn) =>
+    btn.addEventListener("click", () => {
+      rig.target = btn.dataset.target;
+      document.querySelectorAll(".rig-kind[data-target]").forEach((b) => b.classList.toggle("on", b === btn));
+      const t = RIG_TARGETS.find((x) => x.id === rig.target);
+      document.getElementById("rig-target-desc").textContent = t ? t.hint : "";
     })
   );
 
@@ -1209,6 +1394,19 @@ function rigRenderSetup() {
   });
   drawPins();
 
+  document.getElementById("rig-flip").addEventListener("click", async () => {
+    // Front and back are guessed from the silhouette, and long hair or a
+    // backpack fools it. Everything downstream (eyes, mouth, left vs right)
+    // hangs off this, so re-read the model the other way round.
+    rig.faceFront = !rig.faceFront;
+    rig.eyes = [];
+    rig.mouth = null;
+    try {
+      await rigStart("analyze", { source_id: rig.source.id, face_front: rig.faceFront });
+    } catch (err) {
+      rigFoot(String(err.message || err), "bad");
+    }
+  });
   document.getElementById("rig-restart").addEventListener("click", () => {
     rig.analysis = null;
     rig.job = null;
@@ -1223,6 +1421,8 @@ function rigRenderSetup() {
         height_m: parseFloat(document.getElementById("rig-height").value) || 0,
         eyes: rig.eyes.length === 2 ? rig.eyes : null,
         mouth: rig.mouth,
+        target: rig.target,
+        face_front: rig.faceFront,
       });
     } catch (err) {
       rigFoot(String(err.message || err), "bad");
@@ -1239,19 +1439,46 @@ function rigRenderResult() {
       : "";
   const travel = r.face?.travel || {};
   const faint = Object.entries(travel).filter(([, v]) => v < 0.004);
+  const how =
+    r.weights.method === "source"
+      ? "Kept the skeleton and weights the model came with"
+      : r.weights.method === "automatic"
+        ? "Heat weights"
+        : "Proximity weights";
+  const feelings = ["happy", "angry", "sad", "relaxed", "surprised"].filter((k) => r.previews[k]);
+  const extras = [
+    r.fingers ? `${r.fingers} finger bones` : "",
+    r.mtoon ? "MToon materials" : "",
+    r.separated_faces ? "arms cut free of the body" : "",
+  ].filter(Boolean);
   rigSet(
     `<div><h4>${escapeHtml(r.archetype_label)}</h4>` +
       `<p class="good">Rigged in ${r.seconds}s · ${r.bones} bones · ` +
       `${(r.bytes / 1e6).toFixed(1)} MB · ${r.height_m} m tall</p>` +
-      `<p class="muted">${r.weights.method === "automatic" ? "Heat" : "Proximity"} weights, ` +
-      `${r.weights.covered.toLocaleString()}/${r.weights.total.toLocaleString()} vertices bound</p></div>` +
-      `<div class="rig-shots">${shot("front", "rig")}${shot("side", "side")}</div>` +
+      `<p class="muted">${how}, ` +
+      `${r.weights.covered.toLocaleString()}/${r.weights.total.toLocaleString()} vertices bound` +
+      `${extras.length ? " · " + escapeHtml(extras.join(" · ")) : ""}</p>` +
+      (r.fingers_note ? `<p class="muted">${escapeHtml(r.fingers_note)}</p>` : "") +
+      `</div>` +
+      `<div class="rig-shots">${shot("front", "rig")}${shot("side", "side")}${shot("tpose", "T-pose")}</div>` +
+      (r.previews.tpose
+        ? `<p class="muted">The T-pose is how the file actually rests, and the first time the arms are asked to move — look at the armpits and hands there.</p>`
+        : "") +
       `<div class="rig-shots">${shot("face", "face")}${shot("blink", "blink")}${shot("mouth", "mouth")}</div>` +
+      (feelings.length
+        ? `<div class="rig-shots">${feelings.slice(0, 3).map((k) => shot(k, k)).join("")}</div>` +
+          (feelings.length > 3
+            ? `<div class="rig-shots">${feelings.slice(3).map((k) => shot(k, k)).join("")}<div style="flex:1"></div></div>`
+            : "")
+        : "") +
       (faint.length
         ? `<p class="warn">The ${faint
-            .map(([k]) => k.replace("_", " "))
-            .join(" and ")} shape barely moves. Re-run and click the eyes and mouth on the face shot.</p>`
-        : `<p class="muted">Check the blink and mouth shots — that's the tracking driving the face.</p>`) +
+            .map(([k]) => k.replaceAll("_", " "))
+            .join(" and ")} shape${faint.length > 1 ? "s" : ""} barely move${faint.length > 1 ? "" : "s"}. Re-run and click the eyes and mouth on the face shot.</p>`
+        : `<p class="muted">Check the blink and mouth shots — that's the tracking driving the face.${
+            feelings.length ? " The five emotions are what a Code27 or an AI persona asks for by name." : ""
+          }</p>`) +
+      rigCheckHtml(r.check) +
       `<div class="rig-row"><button class="primary" id="rig-load" type="button">Load it</button>` +
       `<button id="rig-save" type="button">Save to gallery</button></div>` +
       `<div class="rig-row"><button id="rig-again" type="button">Rig again, differently</button>` +
@@ -1314,6 +1541,408 @@ if (window.Bus) {
     if (mine) rigOnJob(mine);
   });
 }
+
+// ── Moves panel: record · review & trim · gallery · export ───────────
+function fmtSeconds(s) {
+  return `${(+s || 0).toFixed(1)}s`;
+}
+
+function onPlayerChange() {
+  els.btnRec.disabled = !!player.clip && rec.state === "idle";
+  if (!els.moves.classList.contains("hidden") && rec.state !== "review") renderMoves();
+}
+
+function setRecUi() {
+  const label = { idle: "● Record", countdown: "Get ready…", recording: "■ Stop", review: "● Record" }[rec.state];
+  els.btnRec.textContent = label;
+  els.btnRec.classList.toggle("rec", rec.state === "recording" || rec.state === "countdown");
+}
+
+async function startRecording() {
+  if (rec.state !== "idle" && rec.state !== "review") return;
+  stopClip();
+  if (!settings.tracking) await startTracking();
+  if (!settings.tracking) return; // camera refused — startTracking already said why
+  rec.take = null;
+  rec.state = "countdown";
+  setRecUi();
+  let n = 3;
+  const tick = () => {
+    if (rec.state !== "countdown") return;
+    if (n > 0) {
+      setStatus(`recording in ${n}…`);
+      n -= 1;
+      rec.timer = setTimeout(tick, 1000);
+      return;
+    }
+    rec.frames = [];
+    rec.t0 = performance.now();
+    rec.last = 0;
+    rec.state = "recording";
+    setRecUi();
+    setStatus(`● recording — press Stop when you're done (up to ${REC_MAX_SECONDS}s)`);
+    // Say what is being captured while it happens — otherwise a take with
+    // your face out of shot only turns out empty after you press Stop.
+    clearInterval(rec.meter);
+    rec.meter = setInterval(() => {
+      if (rec.state !== "recording") return clearInterval(rec.meter);
+      const got = rec.frames.length ? rec.frames[rec.frames.length - 1].t : 0;
+      if (performance.now() - lastFaceAt > 1500) {
+        setStatus("● recording — but I can't see your face. Face the camera this avatar is tracking.", true);
+      } else {
+        setStatus(`● recording ${got.toFixed(1)}s — press Stop when you're done`);
+      }
+    }, 500);
+  };
+  tick();
+}
+
+function stopRecording() {
+  clearTimeout(rec.timer);
+  clearInterval(rec.meter);
+  if (rec.state === "countdown") {
+    rec.state = "idle";
+    setRecUi();
+    setStatus("recording cancelled", false, true);
+    return;
+  }
+  if (rec.state !== "recording") return;
+  const frames = rec.frames;
+  rec.frames = [];
+  if (frames.length < 5) {
+    rec.state = "idle";
+    setRecUi();
+    setStatus("nothing was captured — the tracker has to see your face while you record", true);
+    return;
+  }
+  const duration = frames[frames.length - 1].t;
+  rec.take = { name: "", frames, duration, from: 0, to: duration };
+  rec.state = "review";
+  setRecUi();
+  setStatus(`captured ${fmtSeconds(duration)} — name it and save`, false, true);
+  els.gallery.classList.add("hidden");
+  els.rig?.classList.add("hidden");
+  els.moves.classList.remove("hidden");
+  renderReview();
+  playClip(rec.take, { loop: true });
+}
+
+els.btnRec.addEventListener("click", () => {
+  if (rec.state === "recording" || rec.state === "countdown") stopRecording();
+  else startRecording().catch((e) => setStatus("could not record: " + (e?.message || e), true));
+});
+
+function discardTake() {
+  stopClip();
+  rec.take = null;
+  rec.state = "idle";
+  setRecUi();
+  renderMoves();
+}
+
+// Review the take you just made: it loops on the avatar while you trim the
+// reach-for-the-button moments off each end and give it a name.
+function renderReview() {
+  const take = rec.take;
+  const box = els.movesList;
+  box.replaceChildren();
+  const card = document.createElement("div");
+  card.className = "g-item m-review";
+
+  const title = document.createElement("div");
+  title.className = "g-name";
+  title.textContent = "New move";
+  const name = document.createElement("input");
+  name.type = "text";
+  name.maxLength = 60;
+  name.placeholder = "Name it — wave, dance, shrug…";
+  name.className = "m-input";
+  name.value = take.name;
+  name.addEventListener("input", () => (take.name = name.value));
+
+  const length = document.createElement("div");
+  length.className = "g-tags";
+  const showLength = () =>
+    (length.textContent = `keeping ${fmtSeconds(take.to - take.from)} of ${fmtSeconds(take.duration)} · it loops on the avatar while you trim`);
+
+  const slider = (labelText, key) => {
+    const row = document.createElement("label");
+    row.className = "m-trim";
+    const span = document.createElement("span");
+    span.textContent = labelText;
+    const input = document.createElement("input");
+    input.type = "range";
+    input.min = "0";
+    input.max = String(take.duration);
+    input.step = "0.05";
+    input.value = String(take[key]);
+    input.addEventListener("input", () => {
+      let v = parseFloat(input.value);
+      // keep at least a quarter second between the two handles
+      if (key === "from") v = Math.min(v, take.to - 0.25);
+      else v = Math.max(v, take.from + 0.25);
+      take[key] = Math.max(0, Math.min(take.duration, v));
+      input.value = String(take[key]);
+      showLength();
+      playClip(take, { loop: true, from: take.from, to: take.to });
+    });
+    row.append(span, input);
+    return row;
+  };
+
+  const actions = document.createElement("div");
+  actions.className = "g-actions";
+  const save = document.createElement("button");
+  save.textContent = "Save move";
+  save.className = "m-primary";
+  const again = document.createElement("button");
+  again.textContent = "Record again";
+  const discard = document.createElement("button");
+  discard.textContent = "Discard";
+  discard.className = "g-del";
+  const note = document.createElement("div");
+  note.className = "g-tags m-note";
+
+  save.addEventListener("click", async () => {
+    save.disabled = true;
+    note.textContent = "saving…";
+    try {
+      const frames = take.frames
+        .filter((f) => f.t >= take.from && f.t <= take.to)
+        .map((f) => ({ ...f, t: f.t - take.from }));
+      const res = await fetch("/api/avatar/animations", {
+        method: "POST",
+        headers: authHeaders({ "Content-Type": "application/json" }),
+        body: JSON.stringify({ name: take.name.trim(), frames }),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (res.status === 401) throw new Error("the admin password is needed — enter it under Setup on the dashboard");
+      if (!res.ok) throw new Error(body.detail || "could not save");
+      setStatus(`saved “${body.animation.name}” ✓`, false, true);
+      discardTake();
+    } catch (err) {
+      note.textContent = String(err?.message || err);
+      save.disabled = false;
+    }
+  });
+  again.addEventListener("click", () => {
+    discardTake();
+    startRecording();
+  });
+  discard.addEventListener("click", discardTake);
+
+  actions.append(save, again, discard);
+  card.append(title, name, slider("Start", "from"), slider("End", "to"), length, actions, note);
+  box.appendChild(card);
+  showLength();
+  name.focus();
+}
+
+async function renderMoves() {
+  if (rec.state === "review") return renderReview();
+  const box = els.movesList;
+  let clips = [];
+  try {
+    clips = (await (await fetch("/api/avatar/animations")).json()).animations || [];
+  } catch {
+    box.innerHTML = "<div class='gallery-empty'>couldn't load your moves</div>";
+    return;
+  }
+  box.replaceChildren();
+  if (!clips.length) {
+    const empty = document.createElement("div");
+    empty.className = "gallery-empty";
+    empty.innerHTML = "No moves yet.<br>Press <b>● Record</b>, act it out, press <b>■ Stop</b>.";
+    box.appendChild(empty);
+    return;
+  }
+  clips
+    .slice()
+    .reverse()
+    .forEach((c) => {
+      const playing = player.clip?.id === c.id;
+      const item = document.createElement("div");
+      item.className = "g-item" + (playing ? " m-playing" : "");
+      const name = document.createElement("div");
+      name.className = "g-name";
+      name.textContent = c.name;
+      const tags = document.createElement("div");
+      tags.className = "g-tags";
+      tags.textContent = `${fmtSeconds(c.duration)} · ${c.body ? "face + body" : "face"}`;
+      const actions = document.createElement("div");
+      actions.className = "g-actions";
+      const button = (text, handler, cls = "") => {
+        const b = document.createElement("button");
+        b.textContent = text;
+        if (cls) b.className = cls;
+        b.addEventListener("click", () => handler(b));
+        actions.appendChild(b);
+        return b;
+      };
+      const trigger = async (loop) => {
+        // Through the server, so OBS avatar sources perform it too.
+        const res = await fetch(`/api/avatar/animations/${c.id}/play`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ loop }),
+        }).catch(() => null);
+        if (!res || !res.ok) playClip(await fetchClip(c.id), { loop }); // server away: play here only
+      };
+      if (playing) {
+        button("■ Stop", () => fetch("/api/avatar/animations/stop", { method: "POST" }).catch(() => stopClip()), "m-primary");
+      } else {
+        button("▶ Play", () => trigger(false), "m-primary");
+        button("↻ Loop", () => trigger(true));
+      }
+      button("Rename", () => {
+        const input = document.createElement("input");
+        input.type = "text";
+        input.maxLength = 60;
+        input.className = "m-input";
+        input.value = c.name;
+        name.replaceChildren(input);
+        input.focus();
+        input.select();
+        const commit = async () => {
+          const value = input.value.trim();
+          if (value && value !== c.name) {
+            await fetch(`/api/avatar/animations/${c.id}`, {
+              method: "PATCH",
+              headers: authHeaders({ "Content-Type": "application/json" }),
+              body: JSON.stringify({ name: value }),
+            });
+          }
+          renderMoves();
+        };
+        input.addEventListener("keydown", (e) => {
+          if (e.key === "Enter") commit();
+          if (e.key === "Escape") renderMoves();
+        });
+        input.addEventListener("blur", commit);
+      });
+      button("Export .vrma", async (b) => {
+        b.disabled = true;
+        try {
+          exportVrma(await fetchClip(c.id));
+        } catch (err) {
+          setStatus("export failed: " + (err?.message || err), true);
+        } finally {
+          b.disabled = false;
+        }
+      });
+      button(
+        "Delete",
+        async (b) => {
+          // two clicks instead of a blocking confirm() dialog
+          if (b.dataset.armed !== "1") {
+            b.dataset.armed = "1";
+            b.textContent = "Really delete?";
+            setTimeout(() => {
+              b.dataset.armed = "";
+              b.textContent = "Delete";
+            }, 3000);
+            return;
+          }
+          await fetch(`/api/avatar/animations/${c.id}`, { method: "DELETE", headers: authHeaders() });
+          clipCache.delete(c.id);
+          renderMoves();
+        },
+        "g-del"
+      );
+      item.append(name, tags, actions);
+      box.appendChild(item);
+    });
+}
+
+els.btnMoves.addEventListener("click", () => {
+  els.gallery.classList.add("hidden");
+  els.rig?.classList.add("hidden");
+  els.moves.classList.toggle("hidden");
+  if (!els.moves.classList.contains("hidden")) renderMoves();
+});
+els.movesClose.addEventListener("click", () => els.moves.classList.add("hidden"));
+
+// ── export: bake a move onto this avatar as a standard .vrma file ─────
+// Runs the whole performance on the loaded avatar off-screen (same code path
+// as playback, stepped at 60 Hz so the smoothing matches what you saw) and
+// samples the resulting bone rotations 30 times a second.
+const EXPORT_EXPRESSIONS = ["blink", "aa", "ih", "ou", "ee", "oh", "surprised", "lookLeft", "lookRight", "lookUp", "lookDown"];
+const EXPORT_ROTATIONS = ["neck", "head", ...BODY_BONES];
+
+function bakeClip(clip) {
+  const vrm = currentVrm;
+  const humanoid = vrm?.humanoid;
+  if (!humanoid?.getNormalizedBoneNode("hips")) throw new Error("load an avatar first");
+  const em = vrm.expressionManager;
+  const node = (n) => humanoid.getNormalizedBoneNode(n);
+  const names = HUMANOID_ORDER.filter((n) => node(n));
+  const exprNames = EXPORT_EXPRESSIONS.filter((n) => em?.getExpression(n) != null);
+  const keepQuat = names.map((n) => node(n).quaternion.clone());
+  const keepExpr = exprNames.map((n) => em.getValue(n) ?? 0);
+  // VRM 0.x avatars face the other way and are spun round at load; .vrma is
+  // always written VRM 1.0-style, so mirror X and Z back for those.
+  const flip = vrm.meta?.metaVersion === "0";
+
+  try {
+    // T-pose → where each bone sits relative to its parent
+    names.forEach((n) => node(n).quaternion.identity());
+    vrm.scene.updateMatrixWorld(true);
+    const world = new Map(names.map((n) => [n, node(n).getWorldPosition(new THREE.Vector3())]));
+    const bones = names.map((n) => {
+      const parent = nearestParent(n, (x) => world.has(x));
+      const p = world.get(n).clone();
+      if (parent) p.sub(world.get(parent));
+      if (flip) p.set(-p.x, p.y, -p.z);
+      return { name: n, parent, translation: [p.x, p.y, p.z] };
+    });
+
+    applyRestPose(vrm);
+    exprNames.forEach((n) => em.setValue(n, 0));
+    const duration = clip.frames[clip.frames.length - 1].t;
+    const count = Math.max(2, Math.round(duration * 30) + 1);
+    const tracked = EXPORT_ROTATIONS.filter((n) => node(n));
+    const times = new Float32Array(count);
+    const rotations = Object.fromEntries(tracked.map((n) => [n, new Float32Array(count * 4)]));
+    const expressions = Object.fromEntries(exprNames.map((n) => [n, new Float32Array(count)]));
+    let cursor = 0;
+    for (let step = 0, out = 0; out < count; step++) {
+      const t = step / 60;
+      while (cursor + 1 < clip.frames.length && clip.frames[cursor + 1].t <= t) cursor++;
+      const frame = clip.frames[cursor];
+      rigFace(frame.f);
+      if (frame.p) rigPose(frame.p);
+      if (step % 2) continue;
+      times[out] = out / 30;
+      for (const n of tracked) {
+        const q = node(n).quaternion;
+        rotations[n].set(flip ? [-q.x, q.y, -q.z, q.w] : [q.x, q.y, q.z, q.w], out * 4);
+      }
+      for (const n of exprNames) expressions[n][out] = em.getValue(n) ?? 0;
+      out++;
+    }
+    return { bones, times, rotations, expressions, name: clip.name || "move" };
+  } finally {
+    names.forEach((n, i) => node(n).quaternion.copy(keepQuat[i]));
+    exprNames.forEach((n, i) => em.setValue(n, keepExpr[i]));
+  }
+}
+
+function exportVrma(clip) {
+  const bytes = buildVrma(bakeClip(clip));
+  const safe = (clip.name || "move").replace(/[^\w\- ]+/g, "").trim().replace(/\s+/g, "-") || "move";
+  const url = URL.createObjectURL(new Blob([bytes], { type: "model/gltf-binary" }));
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `${safe}.vrma`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 5000);
+  setStatus(`exported ${safe}.vrma ✓`, false, true);
+}
+
+// For tests and tinkering from the console.
+window.__moves = { rec, player, playClip, stopClip, bakeClip, buildVrma, fetchClip, vrm: () => currentVrm };
 
 // ── boot ──────────────────────────────────────────────────────────────
 window.__avatarBoot = true; // tells the HTML watchdog the module started OK

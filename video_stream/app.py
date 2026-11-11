@@ -21,7 +21,7 @@ mimetypes.add_type("text/javascript", ".mjs")
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
@@ -39,6 +39,8 @@ from video_stream import autorig
 from video_stream import chaos as chaos_mod
 from video_stream import chat as chat_mod
 from video_stream import overlays
+from video_stream import animations as animations_mod
+from video_stream import devices as devices_mod
 from video_stream import phone as phone_mod
 from video_stream import settings as settings_mod
 from video_stream import setup_wizard
@@ -154,6 +156,10 @@ async def lifespan(_app: FastAPI):
     # while every camera warms up.
     def _startup() -> None:
         try:
+            # Paired phones/tablets get their (offline) cards back first, so
+            # OBS sources pointed at them resolve before the devices reconnect.
+            devices_mod.restore_cameras()
+            hub.emit("cameras", _camera_payload())
             manager.discover(auto_start=True)
             hub.emit("cameras", _camera_payload())
             if config["director"]:
@@ -364,6 +370,13 @@ setup_wizard.init(
 )
 overlays.init(templates=templates, asset_version=lambda: _asset_version())
 phone_mod.init(templates=templates, asset_version=lambda: _asset_version(), config=config)
+devices_mod.init(
+    templates=templates,
+    asset_version=lambda: _asset_version(),
+    config=config,
+    manager=manager,
+    on_change=lambda: hub.emit("cameras", _camera_payload()),
+)
 chaos_mod.init(
     safety=safety,
     # Repo presets first, user presets (~/.config/video-stream/chaos/) second —
@@ -380,11 +393,14 @@ chaos_mod.init(
 )
 chaos_mod.engine.reload()
 autorig.init(gallery_dir=GALLERY_DIR, vrm_dir=GALLERY_VRM)
+animations_mod.init(dir=GALLERY_DIR / "animations", emit=hub.emit)
 app.include_router(settings_mod.router)
 app.include_router(setup_wizard.router)
 app.include_router(overlays.router)
 app.include_router(chat_mod.router)
 app.include_router(phone_mod.router)
+app.include_router(devices_mod.router)
+app.include_router(animations_mod.router)
 app.include_router(chaos_mod.router)
 app.include_router(autorig.router)
 
@@ -495,6 +511,8 @@ def _camera_payload(request: Request | None = None) -> list[dict[str, Any]]:
                 "error": cam.error,
                 "pose": cam.pose,
                 "zoom": cam.zoom,
+                "kind": cam.kind,
+                "device": getattr(manager.get(cam.index), "key", None),
                 "stream_url": f"{primary}/stream/{cam.index}",
                 "view_url": f"{primary}/view/{cam.index}",
                 "preview_url": f"/stream/{cam.index}",
@@ -522,6 +540,17 @@ def _asset_version() -> str:
         return str(int(latest))
     except ValueError:
         return __version__
+
+
+def _ui_version() -> str:
+    """Changes whenever the dashboard's own code does (not when an avatar is
+    saved), so an already-open dashboard can tell it is running old code."""
+    latest = 0.0
+    for folder in (STATIC_DIR / "js", STATIC_DIR / "css", ROOT / "templates"):
+        for f in folder.rglob("*"):
+            if f.is_file():
+                latest = max(latest, f.stat().st_mtime)
+    return str(int(latest)) if latest else __version__
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -562,6 +591,7 @@ async def viewer(request: Request, index: int):
 async def api_status(request: Request):
     return {
         "version": __version__,
+        "ui": _ui_version(),
         "port": config["port"],
         "primary_ip": primary_ip(),
         "bases": _base_urls(request),
@@ -832,10 +862,21 @@ async def api_stop(index: int, request: Request):
 
 
 @app.get("/stream/{index}")
-async def mjpeg_stream(index: int):
+async def mjpeg_stream(index: int, t: str | None = None):
     stream = manager.get(index)
     if stream is None:
         raise HTTPException(status_code=404, detail="Camera not found")
+    if t is not None:
+        # `?t=` is how dashboards before the snapshot previews asked for a
+        # card preview. A tab still running that old script would hold one
+        # never-ending stream per camera and, with a couple of such tabs, use
+        # up all six connections the browser allows to this server — after
+        # which no button on ANY dashboard tab gets an answer. Give those one
+        # still frame instead; OBS and the viewer never send `t`.
+        jpeg = stream.get_jpeg()
+        if jpeg is None:
+            raise HTTPException(status_code=503, detail="No frame available")
+        return Response(jpeg, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
     if not stream.active:
         started = await asyncio.to_thread(stream.start)  # opening a camera blocks
         if not started:
@@ -1170,9 +1211,9 @@ def main(argv: list[str] | None = None) -> None:
     print(f"  Streams    http://{lan}:{args.port}/stream/{{id}}")
     print(f"  OBS view   http://{lan}:{args.port}/view/{{id}}")
     if https is not None:
-        print(f"  Phone      https://{lan}:{args.phone_https_port}/phone  (QR on the dashboard)")
+        print("  Devices    phones/tablets join from the dashboard: QR (Wi-Fi) or USB")
     else:
-        print("  Phone      off — run ./install-phone.sh once to enable phone cameras")
+        print("  Devices    USB phones work now; for Wi-Fi run ./install-phone.sh once")
     if args.open_browser:
         print("  Opening dashboard in your browser…")
     print()

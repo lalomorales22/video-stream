@@ -87,6 +87,37 @@
       .replaceAll('"', "&quot;");
   }
 
+  // Card previews are refreshed snapshot by snapshot instead of holding the
+  // live MJPEG stream open. A browser allows only six connections to one
+  // server, and every MJPEG stream keeps one for as long as it plays: with a
+  // few cameras (or a couple of "Open view" tabs) the pool is full and every
+  // button on this page that talks to the server just hangs. Snapshots are
+  // short requests, one at a time per camera, so the page stays responsive
+  // however many cameras there are. OBS still gets the full-rate stream.
+  function startPreview(img, index) {
+    let lastUrl = null;
+    const again = (ms) => setTimeout(tick, ms);
+    async function tick() {
+      if (!img.isConnected) {
+        if (lastUrl) URL.revokeObjectURL(lastUrl);
+        return; // the card was rebuilt; its replacement runs its own loop
+      }
+      if (document.hidden || img.offsetParent === null) return again(600); // not being looked at
+      try {
+        const res = await fetch(`/snapshot/${index}`, { cache: "no-store" });
+        if (!res.ok) return again(1000);
+        const url = URL.createObjectURL(await res.blob());
+        img.src = url;
+        if (lastUrl) URL.revokeObjectURL(lastUrl);
+        lastUrl = url;
+        again(70);
+      } catch {
+        again(1500); // server restarting — keep trying quietly
+      }
+    }
+    again(60); // after the card is in the page
+  }
+
   function renderCard(camera) {
     const picked = pickUrls(camera);
     const res =
@@ -94,8 +125,11 @@
         ? `${camera.width}×${camera.height}${camera.fps ? ` · ${camera.fps}fps` : ""}`
         : "—";
     const status = camera.active ? "LIVE" : camera.error ? "ERROR" : "OFF";
-    const previewSrc = camera.active ? `/stream/${camera.index}?t=${Date.now()}` : "";
+    // First frame only — startPreview() keeps it moving (see there for why
+    // the dashboard does not use the live MJPEG stream).
+    const previewSrc = camera.active ? `/snapshot/${camera.index}?t=${Date.now()}` : "";
 
+    const isRemote = camera.kind === "remote";
     const onAir = directorState.enabled && directorState.active === camera.index;
     const zoomed = (camera.zoom || 1) > 1.05;
     const card = document.createElement("article");
@@ -105,8 +139,12 @@
       <div class="preview-wrap">
         ${
           camera.active
-            ? `<img src="${previewSrc}" alt="${esc(camera.name)} preview" loading="lazy" />`
-            : `<div class="placeholder">${camera.error ? esc(camera.error) : "stream offline"}</div>`
+            ? `<img src="${previewSrc}" alt="${esc(camera.name)} preview" />`
+            : `<div class="placeholder">${
+                isRemote
+                  ? "This device's camera page isn't on screen. Press Wake camera, or open the page on the device again — it only films while it is showing."
+                  : camera.error ? esc(camera.error) : "stream offline"
+              }</div>`
         }
         <div class="preview-chrome"></div>
         <div class="preview-top">
@@ -120,7 +158,7 @@
         <div class="card-head">
           <div>
             <h3>${esc(camera.name)}</h3>
-            <p class="card-sub">id ${camera.index}${picked.ip ? ` · ${esc(picked.ip)}` : ""}</p>
+            <p class="card-sub">id ${camera.index}${isRemote ? " · phone / tablet" : ""}${picked.ip ? ` · ${esc(picked.ip)}` : ""}</p>
           </div>
         </div>
 
@@ -147,9 +185,11 @@
 
         <div class="card-actions">
           <a class="btn btn-sm" href="/view/${camera.index}" target="_blank" rel="noopener">Open view</a>
-          <button type="button" class="btn btn-sm" data-action="toggle" data-index="${camera.index}">
-            ${camera.active ? "Stop" : "Start"}
-          </button>
+          ${
+            isRemote
+              ? `${camera.active ? "" : `<button type="button" class="btn btn-sm btn-signal" data-action="wake-device" data-index="${camera.index}" title="Reopen the camera page on the device (USB)">Wake camera</button>`}<button type="button" class="btn btn-sm" data-action="remove-device" data-index="${camera.index}" title="Unpair this device and delete its camera">Remove</button>`
+              : `<button type="button" class="btn btn-sm" data-action="toggle" data-index="${camera.index}">${camera.active ? "Stop" : "Start"}</button>`
+          }
           <button type="button" class="btn btn-sm btn-pose${camera.pose ? " on" : ""}" data-action="pose" data-index="${camera.index}" ${camera.active ? "" : "disabled"}>
             ${camera.pose ? "Skeleton ·on" : "Skeleton"}
           </button>
@@ -188,6 +228,7 @@
     // stream server-side, so OBS sees it too); double-click again to go wide.
     const previewImg = card.querySelector(".preview-wrap img");
     if (previewImg) {
+      startPreview(previewImg, camera.index);
       previewImg.addEventListener("dblclick", async (e) => {
         e.preventDefault();
         const cam = state.cameras.find((c) => c.index === camera.index);
@@ -222,6 +263,53 @@
           const { view } = pickUrls(cam);
           const ok = await copyText(view);
           toast(ok ? "OBS view URL copied" : "Could not copy", ok);
+          return;
+        }
+        if (action === "wake-device") {
+          const cam = state.cameras.find((c) => c.index === index);
+          if (!cam?.device) return;
+          btn.disabled = true;
+          try {
+            const res = await fetch(`/api/devices/${encodeURIComponent(cam.device)}/wake`, {
+              method: "POST",
+              headers: authHeaders(),
+            });
+            const body = await res.json().catch(() => ({}));
+            if (!res.ok) throw new Error(body.detail || "Could not wake the camera");
+            toast("Camera page reopened on the device");
+          } catch (err) {
+            toast(err.message || "Could not wake the camera", false);
+          } finally {
+            btn.disabled = false;
+          }
+          return;
+        }
+        if (action === "remove-device") {
+          const cam = state.cameras.find((c) => c.index === index);
+          if (!cam?.device) return;
+          // Two-step button instead of a confirm() dialog: first click arms it.
+          if (btn.dataset.armed !== "1") {
+            btn.dataset.armed = "1";
+            btn.textContent = "Really remove?";
+            setTimeout(() => {
+              btn.dataset.armed = "";
+              btn.textContent = "Remove";
+            }, 3000);
+            return;
+          }
+          btn.disabled = true;
+          try {
+            const res = await fetch(`/api/devices/${encodeURIComponent(cam.device)}`, {
+              method: "DELETE",
+              headers: authHeaders(),
+            });
+            if (!res.ok) throw new Error("Could not remove the device");
+            toast("Device removed");
+            await refresh();
+          } catch (err) {
+            toast(err.message || "Remove failed", false);
+            btn.disabled = false;
+          }
           return;
         }
         if (action === "toggle") {
@@ -279,6 +367,31 @@
     return card;
   }
 
+  // A dashboard left open across an update keeps running the old script
+  // against the new server — buttons then quietly do nothing. Say so.
+  let loadedUi = null;
+  function checkUiVersion(ui) {
+    if (!ui) return;
+    if (loadedUi === null) {
+      loadedUi = ui;
+      return;
+    }
+    if (ui === loadedUi || document.getElementById("update-bar")) return;
+    const bar = document.createElement("div");
+    bar.id = "update-bar";
+    bar.className = "update-bar";
+    bar.setAttribute("role", "status");
+    const text = document.createElement("span");
+    text.textContent = "The app was updated while this page was open.";
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "btn btn-sm btn-signal";
+    btn.textContent = "Reload to get the new version";
+    btn.addEventListener("click", () => location.reload());
+    bar.append(text, btn);
+    document.body.prepend(bar);
+  }
+
   let lastGridSig = "";
 
   function render(force = false) {
@@ -324,6 +437,7 @@
       const res = await fetch("/api/status");
       if (!res.ok) throw new Error("status failed");
       state = await res.json();
+      checkUiVersion(state.ui);
       render();
       renderOverlayChips();
     } catch (err) {
@@ -761,70 +875,195 @@
 
   loadChaos();
 
-  // ── Phone-as-camera: mint a session, show the QR, watch for the phone ─
+  // ── Device cameras: a phone/tablet joins over USB or Wi-Fi and becomes a
+  // real camera card (its own /stream + /view URLs, skeleton, zoom, avatar).
   const phonePanel = document.getElementById("phone-panel");
   const phoneQr = document.getElementById("phone-qr");
-  const phoneTitle = document.getElementById("phone-title");
   const phoneHint = document.getElementById("phone-hint");
-  const phoneViewUrl = document.getElementById("phone-view-url");
   const phoneStatus = document.getElementById("phone-status");
-  let phoneSession = null;
-  let phoneData = null;
-  let phonePollTimer = null;
+  const deviceUsb = document.getElementById("device-usb");
+  let joinData = null;
+  let joinAt = 0;
+  let usbTimer = null;
+  let usbSig = "";
+
+  async function loadJoin() {
+    // Links stay valid 15 min; re-mint a little early so an open panel never
+    // shows a dead QR.
+    if (joinData && Date.now() - joinAt < 10 * 60 * 1000) return joinData;
+    const res = await fetch("/api/devices/join", { headers: authHeaders() });
+    if (res.status === 401) throw new Error("Enter the auth token in Setup first");
+    if (!res.ok) throw new Error("Could not create a pairing link");
+    joinData = await res.json();
+    joinAt = Date.now();
+    return joinData;
+  }
+
+  function usbRow(text, button) {
+    const row = document.createElement("div");
+    row.className = "device-usb-row";
+    const label = document.createElement("span");
+    label.textContent = text;
+    row.appendChild(label);
+    if (button) row.appendChild(button);
+    return row;
+  }
+
+  function renderUsb(info) {
+    const sig = JSON.stringify(info);
+    if (sig === usbSig) return; // don't rebuild (and drop a mid-click button) every poll
+    usbSig = sig;
+    deviceUsb.replaceChildren();
+    const head = document.createElement("strong");
+    head.textContent = "USB cable (Android)";
+    deviceUsb.appendChild(head);
+    if (!info.adb) {
+      deviceUsb.appendChild(
+        usbRow("Needs Android platform tools on this computer: brew install --cask android-platform-tools")
+      );
+      return;
+    }
+    if (!info.devices.length) {
+      deviceUsb.appendChild(
+        usbRow("Plug in an Android phone or tablet with USB debugging turned on — it shows up here.")
+      );
+      return;
+    }
+    info.devices.forEach((d) => {
+      if (d.state === "unauthorized") {
+        deviceUsb.appendChild(
+          usbRow(`${d.model} (${d.serial}): unlock it and tap Allow on the “Allow USB debugging?” prompt.`)
+        );
+        return;
+      }
+      if (d.state !== "device") {
+        deviceUsb.appendChild(usbRow(`${d.model} (${d.serial}): ${d.state} — unplug and plug it back in.`));
+        return;
+      }
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "btn btn-sm btn-signal";
+      btn.textContent = "Open camera on it";
+      btn.addEventListener("click", async () => {
+        btn.disabled = true;
+        try {
+          const res = await fetch(`/api/devices/usb/${encodeURIComponent(d.serial)}/open`, {
+            method: "POST",
+            headers: authHeaders(),
+          });
+          const body = await res.json().catch(() => ({}));
+          if (!res.ok) throw new Error(body.detail || "Could not open the camera page");
+          toast(`Opened on ${d.model} — allow the camera there`);
+        } catch (err) {
+          toast(err.message || "USB connect failed", false);
+        } finally {
+          btn.disabled = false;
+        }
+      });
+      deviceUsb.appendChild(usbRow(`${d.model} (${d.serial})`, btn));
+    });
+  }
+
+  async function pollUsb() {
+    try {
+      const info = await fetch("/api/devices/usb").then((r) => r.json());
+      renderUsb(info);
+    } catch {}
+    const remote = (state.cameras || []).filter((c) => c.kind === "remote");
+    const live = remote.filter((c) => c.active).length;
+    phoneStatus.textContent = remote.length
+      ? `${live} of ${remote.length} device camera${remote.length === 1 ? "" : "s"} live`
+      : "no devices added yet";
+  }
 
   document.getElementById("btn-phone")?.addEventListener("click", async () => {
     if (!phonePanel.classList.contains("hidden")) {
       phonePanel.classList.add("hidden");
-      clearInterval(phonePollTimer);
+      clearInterval(usbTimer);
       return;
     }
+    // Open straight away: the panel itself reports progress and problems, so
+    // a slow or failed request can never look like a dead button.
+    phonePanel.classList.remove("hidden");
+    phoneQr.classList.add("hidden");
+    phoneHint.textContent = "Getting a pairing code…";
+    phonePanel.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    usbSig = "";
+    pollUsb();
+    clearInterval(usbTimer);
+    usbTimer = setInterval(pollUsb, 2500);
     try {
-      // Reuse the session across open/close — re-minting would orphan a
-      // phone that's mid-scan on the previous QR.
-      if (!phoneData) {
-        const res = await fetch("/api/phone/session");
-        if (!res.ok) throw new Error("Could not create a phone session");
-        phoneData = await res.json();
-      }
-      const d = phoneData;
-      phoneSession = d.session;
-      phonePanel.classList.remove("hidden");
-      if (!d.https) {
-        phoneQr.classList.add("hidden");
-        phoneTitle.textContent = "One-time setup needed";
+      const d = await loadJoin();
+      if (d.https) {
+        phoneQr.classList.remove("hidden");
+        phoneQr.src = d.qr_url;
         phoneHint.textContent =
-          "Phones only allow camera access on secure pages. In the project folder run ./install-phone.sh once, restart video-stream, and this panel becomes a QR code.";
-        phoneViewUrl.textContent = "";
-        phoneStatus.textContent = "";
-        return;
+          "Wi-Fi: scan this code with the device's camera (same Wi-Fi as this computer). It warns about the certificate once — tap Advanced → Proceed — then allow the camera. The device shows up below as a new camera with its own OBS URL.";
+      } else {
+        phoneHint.textContent =
+          "Wi-Fi needs a one-time step: run ./install-phone.sh in the project folder and restart. Android devices on a USB cable work right now, below.";
       }
-      phoneQr.classList.remove("hidden");
-      phoneQr.src = d.qr_url;
-      phoneTitle.textContent = "Scan with your phone (same Wi-Fi)";
-      phoneViewUrl.textContent = d.view_url;
-      phoneViewUrl.onclick = async () => {
-        const ok = await copyText(d.view_url);
-        toast(ok ? "View URL copied — paste into OBS as a Browser Source" : "Could not copy", ok);
-      };
-      document.getElementById("btn-phone-copy").onclick = phoneViewUrl.onclick;
-      phoneStatus.textContent = "waiting for the phone…";
-      clearInterval(phonePollTimer);
-      phonePollTimer = setInterval(async () => {
-        try {
-          const s = await fetch("/api/phone/status").then((r) => r.json());
-          const members = (s.sessions || {})[phoneSession] || 0;
-          phoneStatus.textContent =
-            members >= 2
-              ? "✓ phone connected — the view URL is live"
-              : members === 1
-              ? "receiver open — waiting for the phone…"
-              : "waiting for the phone…";
-        } catch {}
-      }, 2500);
     } catch (err) {
-      toast(err.message || "Phone setup failed", false);
+      phoneHint.textContent = `Could not get a pairing code: ${err.message || "the app did not answer"}. Close this panel and open it again to retry.`;
     }
   });
+
+  // ── Moves: trigger a recorded avatar performance from the dashboard ──
+  const movesSelect = document.getElementById("moves-select");
+  async function loadMoves() {
+    if (!movesSelect) return;
+    let clips = [];
+    try {
+      clips = (await fetch("/api/avatar/animations").then((r) => r.json())).animations || [];
+    } catch {
+      return; // keep whatever is listed; the next change event retries
+    }
+    const keep = movesSelect.value;
+    movesSelect.replaceChildren();
+    if (!clips.length) {
+      const o = document.createElement("option");
+      o.value = "";
+      o.textContent = "none yet — record one in the Avatar tab";
+      movesSelect.appendChild(o);
+    }
+    clips
+      .slice()
+      .reverse()
+      .forEach((c) => {
+        const o = document.createElement("option");
+        o.value = c.id;
+        o.textContent = `${c.name} (${(+c.duration || 0).toFixed(1)}s)`;
+        movesSelect.appendChild(o);
+      });
+    if ([...movesSelect.options].some((o) => o.value === keep)) movesSelect.value = keep;
+    const none = !clips.length;
+    document.getElementById("btn-move-play").disabled = none;
+    document.getElementById("btn-move-loop").disabled = none;
+  }
+  async function triggerMove(loop) {
+    const id = movesSelect.value;
+    if (!id) return;
+    try {
+      const res = await fetch(`/api/avatar/animations/${id}/play`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ loop }),
+      });
+      if (!res.ok) throw new Error("That move no longer exists");
+      toast(loop ? "Looping on your avatars" : "Playing on your avatars");
+    } catch (err) {
+      toast(err.message || "Could not play the move", false);
+      loadMoves();
+    }
+  }
+  document.getElementById("btn-move-play")?.addEventListener("click", () => triggerMove(false));
+  document.getElementById("btn-move-loop")?.addEventListener("click", () => triggerMove(true));
+  document.getElementById("btn-move-stop")?.addEventListener("click", async () => {
+    await fetch("/api/avatar/animations/stop", { method: "POST" }).catch(() => {});
+    toast("Back to live tracking");
+  });
+  Bus.on("avatar_animations", loadMoves);
+  loadMoves();
 
   // ── Unified chat: connect Twitch/Kick, show live status ─────────────
   const chatTwitch = document.getElementById("chat-twitch");
@@ -899,10 +1138,17 @@
   const setupChecklist = document.getElementById("setup-checklist");
   const setupProposal = document.getElementById("setup-proposal");
   const setupSettings = document.getElementById("setup-settings");
+  const obsState = document.getElementById("obs-state");
+  const obsHelp = document.getElementById("obs-help");
+  const obsPassword = document.getElementById("obs-password");
+  const obsPlan = document.getElementById("obs-plan");
+  const buildState = document.getElementById("build-state");
+  const verifyState = document.getElementById("verify-state");
   // A form whose only field is a lone text/password input implicit-submits on
   // Enter (full page reload) — the setup form must never navigate.
   setupSettings?.addEventListener("submit", (e) => e.preventDefault());
   let settingsLoaded = false;
+  let obsNames = { scenes: [], inputs: [] }; // suggestions for scene/source fields
 
   function authHeaders() {
     const token = localStorage.getItem("vs-token");
@@ -911,12 +1157,326 @@
     return headers;
   }
 
+  function setPill(el, text, kind) {
+    if (!el) return;
+    el.textContent = text;
+    el.className = `step-state${kind ? " " + kind : ""}`;
+  }
+
+  function openSetup(stepId) {
+    if (setupPanel.classList.contains("hidden")) btnSetup.click();
+    if (stepId) document.getElementById(stepId)?.scrollIntoView({ behavior: "smooth", block: "center" });
+  }
+
   btnSetup?.addEventListener("click", () => {
     const open = setupPanel.classList.toggle("hidden") === false;
     btnSetup.setAttribute("aria-pressed", open ? "true" : "false");
     btnSetup.classList.toggle("on", open);
-    if (open && !settingsLoaded) loadSettings();
+    if (open) {
+      checkObs();
+      if (!settingsLoaded) loadSettings();
+    }
   });
+
+  // ── Step 1: connect to OBS ──────────────────────────────────────────
+  async function checkObs() {
+    setPill(obsState, "checking…");
+    try {
+      const data = await fetch("/api/setup/scan").then((r) => r.json());
+      const obs = data.obs || {};
+      obsNames = { scenes: obs.scenes || [], inputs: obs.inputs || [] };
+      fillSuggestions();
+      if (obs.reachable) {
+        const n = obsNames.scenes.length;
+        setPill(obsState, `connected · ${n} scene${n === 1 ? "" : "s"}`, "ok");
+        obsHelp.classList.add("hidden");
+      } else {
+        setPill(obsState, "not connected", "bad");
+        obsHelp.classList.remove("hidden");
+      }
+      return !!obs.reachable;
+    } catch {
+      setPill(obsState, "could not check", "bad");
+      return false;
+    }
+  }
+
+  document.getElementById("btn-obs-test")?.addEventListener("click", async (e) => {
+    const btn = e.currentTarget;
+    btn.disabled = true;
+    try {
+      // Only send the password when one was typed — an empty box must not
+      // wipe a password that is already saved.
+      if (obsPassword.value) {
+        const res = await fetch("/api/settings", {
+          method: "POST",
+          headers: authHeaders(),
+          body: JSON.stringify({ obs_password: obsPassword.value }),
+        });
+        if (res.status === 401) {
+          openAdvanced();
+          renderTokenPrompt();
+          throw new Error("Enter the admin password under All settings first");
+        }
+        if (!res.ok) throw new Error("Could not save the password");
+        obsPassword.value = "";
+      }
+      const ok = await checkObs();
+      toast(ok ? "Connected to OBS" : "Still can't reach OBS — is the WebSocket server enabled?", ok);
+    } catch (err) {
+      toast(err.message || "Connect failed", false);
+    } finally {
+      btn.disabled = false;
+    }
+  });
+  obsPassword?.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") document.getElementById("btn-obs-test").click();
+  });
+
+  // ── Step 2: build the scenes ────────────────────────────────────────
+  async function obsBuild(apply) {
+    const res = await fetch("/api/setup/obs-build", {
+      method: "POST",
+      headers: authHeaders(),
+      body: JSON.stringify({ apply, overlays: document.getElementById("build-overlays").checked }),
+    });
+    if (res.status === 401) {
+      openAdvanced();
+      renderTokenPrompt();
+      throw new Error("Enter the admin password under All settings first");
+    }
+    if (!res.ok) throw new Error("OBS setup failed");
+    return res.json();
+  }
+
+  function renderPlan(data) {
+    obsPlan.replaceChildren();
+    obsPlan.classList.remove("hidden");
+    const note = (text) => {
+      const p = document.createElement("p");
+      p.className = "muted";
+      p.textContent = text;
+      obsPlan.appendChild(p);
+    };
+    if (!data.reachable) {
+      note("OBS isn't connected yet — finish step 1 first.");
+      setPill(obsState, "not connected", "bad");
+      obsHelp.classList.remove("hidden");
+      return;
+    }
+    if (data.no_cameras) {
+      note("No cameras yet — plug one in and hit Rescan, or add a phone or tablet, then come back.");
+      return;
+    }
+    const list = document.createElement("div");
+    list.className = "setup-checklist";
+    data.steps.forEach((s) => {
+      const row = document.createElement("div");
+      const state = s.state || (s.new ? "todo" : "kept");
+      row.className = `check-row ${state === "failed" ? "bad" : state === "todo" ? "" : "ok"}`;
+      const mark = document.createElement("span");
+      mark.className = "check-mark";
+      mark.textContent = { todo: "+", done: "✓", kept: "·", failed: "✗" }[state];
+      const name = document.createElement("span");
+      name.className = "check-name";
+      name.textContent = s.label;
+      const detail = document.createElement("span");
+      detail.className = "check-details mono";
+      detail.textContent = { todo: "will be added", done: "added", kept: "already there", failed: "OBS refused" }[state];
+      row.append(mark, name, detail);
+      list.appendChild(row);
+    });
+    obsPlan.appendChild(list);
+
+    if (data.applied) {
+      const failed = data.failed || 0;
+      note(
+        failed
+          ? `${failed} step${failed === 1 ? "" : "s"} failed — check OBS, then run this again (finished steps are skipped).`
+          : "Done. Your cameras now have scenes in OBS and the director knows which is which."
+      );
+      setPill(buildState, failed ? "partly done" : "done", failed ? "bad" : "ok");
+      return;
+    }
+    if (!data.to_do) {
+      note("Everything is already set up — nothing to add.");
+      setPill(buildState, "done", "ok");
+      return;
+    }
+    note(`This adds ${data.to_do} thing${data.to_do === 1 ? "" : "s"} to OBS. Nothing you already have is changed or removed.`);
+    const go = document.createElement("button");
+    go.type = "button";
+    go.className = "btn btn-sm btn-signal";
+    go.textContent = "Add these to OBS";
+    go.addEventListener("click", async () => {
+      go.disabled = true;
+      try {
+        const done = await obsBuild(true);
+        renderPlan(done);
+        settingsLoaded = false;
+        loadSettings(); // the scene map changed
+        checkObs();
+        toast(done.failed ? "Some steps failed" : "OBS is set up", !done.failed);
+      } catch (err) {
+        toast(err.message || "OBS setup failed", false);
+        go.disabled = false;
+      }
+    });
+    obsPlan.appendChild(go);
+  }
+
+  document.getElementById("btn-obs-plan")?.addEventListener("click", async (e) => {
+    const btn = e.currentTarget;
+    btn.disabled = true;
+    setupProposal.classList.add("hidden");
+    try {
+      renderPlan(await obsBuild(false));
+    } catch (err) {
+      toast(err.message || "Could not plan the OBS setup", false);
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
+  document.getElementById("btn-generate")?.addEventListener("click", async () => {
+    obsPlan.classList.add("hidden");
+    try {
+      const res = await fetch("/api/setup/generate", { method: "POST" });
+      if (!res.ok) throw new Error("Could not read your scenes");
+      const data = await res.json();
+      setupProposal.replaceChildren();
+      setupProposal.classList.remove("hidden");
+      const pairs = Object.entries(data.proposal);
+      const say = (text) => {
+        const p = document.createElement("p");
+        p.className = "muted";
+        p.textContent = text;
+        setupProposal.appendChild(p);
+      };
+      if (!pairs.length) {
+        say(
+          data.obs_reachable
+            ? "None of your scenes look like camera scenes. Name them like “Cam 0”, “Cam 1” — or use “Set up OBS for me”."
+            : "OBS isn't connected yet — finish step 1 first."
+        );
+        return;
+      }
+      say("Best match between your cameras and your scenes:");
+      pairs.forEach(([index, scene]) => {
+        const cam = state.cameras.find((c) => String(c.index) === String(index));
+        const row = document.createElement("div");
+        row.className = "check-row ok";
+        const mark = document.createElement("span");
+        mark.className = "check-mark";
+        mark.textContent = "→";
+        const name = document.createElement("span");
+        name.className = "check-name";
+        name.textContent = `${cam ? cam.name : "Camera"} (id ${index})`;
+        const detail = document.createElement("span");
+        detail.className = "check-details mono";
+        detail.textContent = `scene “${scene}”`;
+        row.append(mark, name, detail);
+        setupProposal.appendChild(row);
+      });
+      if (data.unmatched_cameras?.length) {
+        say(`No scene found for camera ${data.unmatched_cameras.join(", ")}.`);
+      }
+      const apply = document.createElement("button");
+      apply.type = "button";
+      apply.className = "btn btn-sm btn-signal";
+      apply.textContent = "Use this";
+      apply.addEventListener("click", async () => {
+        const res2 = await fetch("/api/settings", {
+          method: "POST",
+          headers: authHeaders(),
+          body: JSON.stringify({ obs_scene_map: data.scene_map_string }),
+        });
+        if (res2.status === 401) {
+          openAdvanced();
+          renderTokenPrompt();
+          toast("Enter the admin password first", false);
+          return;
+        }
+        if (res2.ok) {
+          setPill(buildState, "done", "ok");
+          settingsLoaded = false;
+          loadSettings();
+        }
+        toast(res2.ok ? "Cameras linked to your scenes" : "Could not save", res2.ok);
+      });
+      setupProposal.appendChild(apply);
+    } catch (err) {
+      toast(err.message || "Could not read your scenes", false);
+    }
+  });
+
+  // ── Step 3: check everything ────────────────────────────────────────
+  const FIXES = {
+    obs: { label: "Connect OBS", run: () => { openSetup("step-obs"); obsPassword?.focus(); } },
+    build: { label: "Set it up", run: () => { openSetup("step-build"); document.getElementById("btn-obs-plan").click(); } },
+    device: { label: "Add a phone", run: () => { if (phonePanel.classList.contains("hidden")) document.getElementById("btn-phone").click(); phonePanel.scrollIntoView({ behavior: "smooth", block: "center" }); } },
+  };
+
+  document.getElementById("btn-verify")?.addEventListener("click", async () => {
+    setupChecklist.replaceChildren();
+    setPill(verifyState, "checking…");
+    try {
+      const res = await fetch("/api/setup/verify");
+      if (!res.ok) throw new Error("Check failed");
+      const data = await res.json();
+      data.checks.forEach((c) => {
+        const row = document.createElement("div");
+        row.className = `check-row ${c.ok ? "ok" : "bad"}`;
+        const mark = document.createElement("span");
+        mark.className = "check-mark";
+        mark.textContent = c.ok ? "✓" : "✗";
+        const name = document.createElement("span");
+        name.className = "check-name";
+        name.textContent = c.name;
+        const detail = document.createElement("span");
+        detail.className = "check-details mono";
+        detail.textContent = c.details;
+        row.append(mark, name, detail);
+        const fix = c.fix && FIXES[c.fix];
+        if (fix) {
+          const btn = document.createElement("button");
+          btn.type = "button";
+          btn.className = "btn btn-sm";
+          btn.textContent = fix.label;
+          btn.addEventListener("click", fix.run);
+          row.appendChild(btn);
+        }
+        setupChecklist.appendChild(row);
+      });
+      const all = data.passed === data.total;
+      setPill(verifyState, `${data.passed} of ${data.total} ok`, all ? "ok" : "bad");
+      toast(`Check: ${data.passed} of ${data.total} ok`, all);
+    } catch (err) {
+      setPill(verifyState, "could not check", "bad");
+      toast(err.message || "Check failed", false);
+    }
+  });
+
+  // ── All settings (grouped, plain-language) ──────────────────────────
+  function openAdvanced() {
+    openSetup();
+    const adv = document.getElementById("setup-advanced");
+    if (adv) adv.open = true;
+  }
+
+  function fillSuggestions() {
+    for (const [id, names] of [["obs-scenes", obsNames.scenes], ["obs-inputs", obsNames.inputs]]) {
+      const list = document.getElementById(id);
+      if (!list) continue;
+      list.replaceChildren(
+        ...names.map((n) => {
+          const o = document.createElement("option");
+          o.value = n;
+          return o;
+        })
+      );
+    }
+  }
 
   async function loadSettings() {
     try {
@@ -937,8 +1497,8 @@
   function renderTokenPrompt() {
     setupSettings.innerHTML = `
       <div class="settings-row">
-        <label for="vs-token-input">Auth token</label>
-        <input type="password" id="vs-token-input" placeholder="X-Auth-Token" />
+        <label for="vs-token-input">Admin password</label>
+        <input type="password" id="vs-token-input" placeholder="the admin password you set" />
         <button type="button" class="btn btn-sm" id="vs-token-save">Unlock</button>
       </div>`;
     document.getElementById("vs-token-save").addEventListener("click", () => {
@@ -954,25 +1514,59 @@
   }
 
   function renderSettingsForm(fields) {
-    setupSettings.innerHTML = "";
+    setupSettings.replaceChildren();
+    const groups = new Map();
     fields.forEach((f) => {
-      const row = document.createElement("div");
-      row.className = "settings-row";
-      const id = `set-${f.key}`;
-      const input =
-        f.kind === "bool"
-          ? `<input type="checkbox" id="${id}" data-key="${f.key}" data-kind="bool" ${f.value ? "checked" : ""} />`
-          : `<input type="${f.secret ? "password" : "text"}" id="${id}" data-key="${f.key}" data-kind="${f.kind}"
-               value="${esc(String(f.value ?? ""))}" placeholder="${esc(String(f.default ?? ""))}" />`;
-      row.innerHTML = `<label for="${id}" title="${esc(f.help)}">${esc(f.key)}</label>${input}`;
-      setupSettings.appendChild(row);
+      if (!groups.has(f.group)) groups.set(f.group, []);
+      groups.get(f.group).push(f);
+    });
+    groups.forEach((items, groupName) => {
+      const box = document.createElement("fieldset");
+      box.className = "settings-group";
+      const legend = document.createElement("legend");
+      legend.textContent = groupName;
+      box.appendChild(legend);
+      items.forEach((f) => {
+        const row = document.createElement("div");
+        row.className = `settings-field${f.kind === "bool" ? " is-bool" : ""}`;
+        const id = `set-${f.key}`;
+        const label = document.createElement("label");
+        label.htmlFor = id;
+        label.textContent = f.label || f.key;
+        const input = document.createElement("input");
+        input.id = id;
+        input.dataset.key = f.key;
+        input.dataset.kind = f.kind;
+        if (f.kind === "bool") {
+          input.type = "checkbox";
+          input.checked = !!f.value;
+        } else {
+          input.type = f.secret ? "password" : "text";
+          input.value = String(f.value ?? "");
+          input.placeholder = String(f.default ?? "");
+          if (f.kind === "int" || f.kind === "float") input.inputMode = "decimal";
+          if (f.suggest === "scene") input.setAttribute("list", "obs-scenes");
+          if (f.suggest === "input") input.setAttribute("list", "obs-inputs");
+        }
+        const help = document.createElement("small");
+        help.textContent = f.help || "";
+        row.append(label, input, help);
+        box.appendChild(row);
+      });
+      setupSettings.appendChild(box);
     });
     const actions = document.createElement("div");
-    actions.className = "settings-row settings-save";
-    actions.innerHTML = `<span class="muted mono">changes apply live · director restarts if running</span>
-      <button type="button" class="btn btn-sm btn-signal" id="btn-save-settings">Save settings</button>`;
+    actions.className = "settings-save";
+    const hint = document.createElement("span");
+    hint.className = "muted";
+    hint.textContent = "Changes apply right away.";
+    const save = document.createElement("button");
+    save.type = "button";
+    save.className = "btn btn-sm btn-signal";
+    save.textContent = "Save settings";
+    save.addEventListener("click", saveSettings);
+    actions.append(hint, save);
     setupSettings.appendChild(actions);
-    document.getElementById("btn-save-settings").addEventListener("click", saveSettings);
   }
 
   async function saveSettings() {
@@ -986,7 +1580,9 @@
         const raw = el.value.trim() === "" ? el.placeholder : el.value;
         value = kind === "int" ? parseInt(raw, 10) : parseFloat(raw);
         if (Number.isNaN(value)) {
-          toast(`${key}: not a number`, false);
+          const name = el.closest(".settings-field")?.querySelector("label")?.textContent || key;
+          toast(`${name}: that needs to be a number`, false);
+          el.focus();
           return;
         }
       }
@@ -1001,74 +1597,19 @@
       const body = await res.json().catch(() => ({}));
       if (res.status === 401) {
         renderTokenPrompt();
-        throw new Error("Auth token required");
+        throw new Error("Admin password required");
       }
       if (!res.ok) throw new Error(body.detail || "Save failed");
+      // A newly set admin password is needed for the very next request.
+      const newToken = updates.auth_token;
+      if (newToken && newToken !== "••••••") localStorage.setItem("vs-token", newToken);
       renderSettingsForm(body.fields);
       toast("Settings saved");
+      checkObs();
     } catch (err) {
       toast(err.message || "Save failed", false);
     }
   }
-
-  document.getElementById("btn-verify")?.addEventListener("click", async () => {
-    setupChecklist.innerHTML = `<div class="muted mono">checking the rig…</div>`;
-    try {
-      const res = await fetch("/api/setup/verify");
-      if (!res.ok) throw new Error("Verify failed");
-      const data = await res.json();
-      setupChecklist.innerHTML = "";
-      data.checks.forEach((c) => {
-        const row = document.createElement("div");
-        row.className = `check-row ${c.ok ? "ok" : "bad"}`;
-        row.innerHTML = `<span class="check-mark">${c.ok ? "✓" : "✗"}</span>
-          <span class="check-name">${esc(c.name)}</span>
-          <span class="check-details mono">${esc(c.details)}</span>`;
-        setupChecklist.appendChild(row);
-      });
-      toast(`Rig check: ${data.passed}/${data.total} passed`, data.passed === data.total);
-    } catch (err) {
-      setupChecklist.innerHTML = "";
-      toast(err.message || "Verify failed", false);
-    }
-  });
-
-  document.getElementById("btn-generate")?.addEventListener("click", async () => {
-    try {
-      const res = await fetch("/api/setup/generate", { method: "POST" });
-      if (!res.ok) throw new Error("Generate failed");
-      const data = await res.json();
-      setupProposal.classList.remove("hidden");
-      const pairs = Object.entries(data.proposal);
-      if (!pairs.length) {
-        setupProposal.innerHTML = `<div class="muted mono">${
-          data.obs_reachable
-            ? "No matching scenes found — name OBS scenes like “Cam 0”, “Cam 1”…"
-            : "OBS unreachable — start OBS and enable its WebSocket server first"
-        }</div>`;
-        return;
-      }
-      setupProposal.innerHTML = `
-        <span class="eyebrow">Proposed scene map</span>
-        <code class="mono">${esc(data.scene_map_string)}</code>
-        <button type="button" class="btn btn-sm btn-signal" id="btn-apply-map">Apply</button>`;
-      document.getElementById("btn-apply-map").addEventListener("click", async () => {
-        const res2 = await fetch("/api/settings", {
-          method: "POST",
-          headers: authHeaders(),
-          body: JSON.stringify({ obs_scene_map: data.scene_map_string }),
-        });
-        if (res2.status === 401) {
-          renderTokenPrompt();
-          toast("Auth token required", false);
-          return;
-        }
-        toast(res2.ok ? "Scene map applied" : "Apply failed", res2.ok);
-      });
-    } catch (err) {
-      toast(err.message || "Generate failed", false);
-    }
-  });
 
   // ── Studio Bus: live push replaces polling while connected ──────────
   Bus.on("director", (d) => {

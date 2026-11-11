@@ -355,3 +355,283 @@ def test_progress_events_update_the_job_and_bound_the_log():
 def test_the_blender_script_and_recipes_ship_together():
     assert autorig.BLENDER_SCRIPT.exists()
     assert autorig.ARCHETYPES_FILE.exists()
+
+
+# ── what a rig is for: target options ─────────────────────────────────
+def test_rig_passes_the_target_and_its_overrides_to_blender(rig_dir, available, monkeypatch):
+    sid = client.post("/api/rig/sources", content=GLB, headers={"x-file-name": "a.glb"}).json()["id"]
+    seen = {}
+
+    def fake_run(self, job):
+        seen.update(job.params)
+        job.state = "done"
+        job.result = {"ok": True}
+
+    monkeypatch.setattr(autorig.RigRunner, "_run", fake_run)
+    job = client.post(
+        "/api/rig/jobs", json={"source_id": sid, "target": "code27", "fingers": False}
+    ).json()
+    for _ in range(200):
+        if client.get(f"/api/rig/jobs/{job['id']}").json()["state"] == "done":
+            break
+    assert seen["target"] == "code27"
+    assert seen["fingers"] is False       # an explicit choice survives
+    assert seen["mtoon"] is None          # "whatever the target wants" stays undecided
+
+
+def test_rig_defaults_to_the_studio_avatar_target(rig_dir, available, monkeypatch):
+    sid = client.post("/api/rig/sources", content=GLB, headers={"x-file-name": "a.glb"}).json()["id"]
+    seen = {}
+    monkeypatch.setattr(autorig.RigRunner, "_run", lambda self, job: seen.update(job.params))
+    client.post("/api/rig/jobs", json={"source_id": sid})
+    for _ in range(200):
+        if seen:
+            break
+    assert seen["target"] == "avatar"
+
+
+def test_rig_refuses_a_target_it_has_never_heard_of(rig_dir, available):
+    sid = client.post("/api/rig/sources", content=GLB, headers={"x-file-name": "a.glb"}).json()["id"]
+    r = client.post("/api/rig/jobs", json={"source_id": sid, "target": "toaster"})
+    assert r.status_code == 400
+    assert "toaster" in r.json()["detail"]
+
+
+# ── the Code27 checklist ──────────────────────────────────────────────
+import struct  # noqa: E402
+
+import numpy as np  # noqa: E402
+
+from video_stream import code27_check  # noqa: E402
+from video_stream.code27_check import check_code27  # noqa: E402
+
+_ALL_PRESETS = ("aa", "ih", "ou", "ee", "oh", "blink", "happy", "angry", "sad", "relaxed", "surprised")
+
+
+def make_vrm(
+    path,
+    *,
+    drop_bones=(),
+    presets=_ALL_PRESETS,
+    mtoon=True,
+    statue=False,
+    arms_down=False,
+    springs=False,
+    fingers=False,
+    vrm0=False,
+    plain_gltf=False,
+):
+    """A tiny but structurally real VRM: a skeleton, one skinned triangle strip
+    with a vertex per bone, expressions, one material. Small enough to read in
+    a test, complete enough that the checker can't tell it from Blender's."""
+    bones = [b for b in code27_check.REQUIRED_BONES if b not in drop_bones]
+    if fingers:
+        bones += ["leftIndexProximal", "rightIndexProximal"]
+    where = {
+        "hips": (0, 1.0, 0), "spine": (0, 1.1, 0), "head": (0, 1.6, 0),
+        "leftUpperArm": (0.2, 1.4, 0), "rightUpperArm": (-0.2, 1.4, 0),
+        "leftLowerArm": (0.45, 1.4, 0), "rightLowerArm": (-0.45, 1.4, 0),
+        "leftHand": (0.7, 1.4, 0), "rightHand": (-0.7, 1.4, 0),
+        "leftUpperLeg": (0.1, 0.9, 0), "rightUpperLeg": (-0.1, 0.9, 0),
+        "leftLowerLeg": (0.1, 0.5, 0), "rightLowerLeg": (-0.1, 0.5, 0),
+        "leftFoot": (0.1, 0.1, 0), "rightFoot": (-0.1, 0.1, 0),
+        "leftIndexProximal": (0.75, 1.4, 0), "rightIndexProximal": (-0.75, 1.4, 0),
+    }
+    if arms_down:
+        where.update({"leftLowerArm": (0.22, 1.15, 0), "rightLowerArm": (-0.22, 1.15, 0)})
+    # Flat hierarchy: every bone is a root, so translation == world position.
+    nodes = [{"name": b, "translation": list(where[b])} for b in bones]
+    nodes.append({"name": "neutral_bone", "translation": [0, 0, 0]})
+    nodes.append({"name": "Body", "mesh": 0, "skin": 0})
+    joints = list(range(len(bones) + 1))
+
+    count = len(bones)
+    positions = np.array([where[b] for b in bones], dtype=np.float32)
+    lead = np.full(count, len(bones), dtype=np.uint16) if statue else np.arange(count, dtype=np.uint16)
+    joint_data = np.zeros((count, 4), dtype=np.uint16)
+    joint_data[:, 0] = lead
+    weight_data = np.zeros((count, 4), dtype=np.float32)
+    weight_data[:, 0] = 1.0
+    indices = np.arange(3 * (count // 3), dtype=np.uint16)
+    chunks = [positions.tobytes(), joint_data.tobytes(), weight_data.tobytes(), indices.tobytes()]
+    views, offset = [], 0
+    for chunk in chunks:
+        views.append({"buffer": 0, "byteOffset": offset, "byteLength": len(chunk)})
+        offset += len(chunk) + (-len(chunk) % 4)
+    blob = b"".join(c + b"\x00" * (-len(c) % 4) for c in chunks)
+
+    material = {"name": "Skin"}
+    if mtoon and not vrm0:
+        material["extensions"] = {"VRMC_materials_mtoon": {"specVersion": "1.0"}}
+    doc = {
+        "asset": {"version": "2.0"},
+        "scenes": [{"nodes": list(range(len(nodes)))}],
+        "nodes": nodes,
+        "skins": [{"joints": joints}],
+        "materials": [material],
+        "meshes": [{"primitives": [{
+            "attributes": {"POSITION": 0, "JOINTS_0": 1, "WEIGHTS_0": 2},
+            "indices": 3, "material": 0,
+        }]}],
+        "accessors": [
+            {"bufferView": 0, "componentType": 5126, "count": count, "type": "VEC3"},
+            {"bufferView": 1, "componentType": 5123, "count": count, "type": "VEC4"},
+            {"bufferView": 2, "componentType": 5126, "count": count, "type": "VEC4"},
+            {"bufferView": 3, "componentType": 5123, "count": len(indices), "type": "SCALAR"},
+        ],
+        "bufferViews": views,
+        "buffers": [{"byteLength": len(blob)}],
+        "extensions": {},
+    }
+    if plain_gltf:
+        pass
+    elif vrm0:
+        names = {"aa": "a", "ih": "i", "ou": "u", "ee": "e", "oh": "o", "happy": "joy",
+                 "sad": "sorrow", "relaxed": "fun", "angry": "angry", "blink": "blink"}
+        doc["extensions"]["VRM"] = {
+            "humanoid": {"humanBones": [{"bone": b, "node": i} for i, b in enumerate(bones)]},
+            "blendShapeMaster": {"blendShapeGroups": [
+                {"presetName": names[p], "binds": [{"mesh": 0, "index": 0, "weight": 100}]}
+                for p in presets if p in names
+            ]},
+            "materialProperties": [{"shader": "VRM/MToon" if mtoon else "Standard"}],
+        }
+    else:
+        doc["extensions"]["VRMC_vrm"] = {
+            "specVersion": "1.0",
+            "humanoid": {"humanBones": {b: {"node": i} for i, b in enumerate(bones)}},
+            "expressions": {"preset": {
+                p: {"morphTargetBinds": [{"node": len(nodes) - 1, "index": 0, "weight": 1.0}]}
+                for p in presets
+            } | {"neutral": {}}},
+        }
+        if springs:
+            doc["extensions"]["VRMC_springBone"] = {"springs": [{"joints": [{"node": 0}]}]}
+    text = json.dumps(doc).encode()
+    text += b" " * (-len(text) % 4)
+    body = struct.pack("<I4s", len(text), b"JSON") + text + struct.pack("<I4s", len(blob), b"BIN\x00") + blob
+    path.write_bytes(b"glTF" + struct.pack("<II", 2, 12 + len(body)) + body)
+    return path
+
+
+def _levels(report):
+    return {item["id"]: item["level"] for item in report["items"]}
+
+
+def test_a_complete_avatar_only_draws_the_optional_warnings(tmp_path):
+    report = check_code27(make_vrm(tmp_path / "ok.vrm"))
+    levels = _levels(report)
+    assert report["verdict"] == "warn"                  # springs + fingers are optional extras
+    assert {k for k, v in levels.items() if v == "warn"} == {"springs", "fingers"}
+    assert levels["bones"] == levels["skin"] == levels["lipsync"] == "pass"
+    assert levels["emotions"] == levels["materials"] == levels["pose"] == "pass"
+    assert "not Code27's own import check" in report["note"]
+
+
+def test_an_avatar_with_every_extra_passes_outright(tmp_path):
+    report = check_code27(make_vrm(tmp_path / "full.vrm", springs=True, fingers=True))
+    assert report["verdict"] == "pass"
+    assert report["counts"]["warn"] == 0 and report["counts"]["fail"] == 0
+
+
+def test_a_statue_fails_even_though_the_file_is_valid(tmp_path):
+    """The bug this checker exists for: a rig that 'succeeded' with every
+    vertex tied to one neutral bone. The JSON looks perfect; nothing moves."""
+    report = check_code27(make_vrm(tmp_path / "statue.vrm", statue=True))
+    assert report["verdict"] == "fail"
+    assert _levels(report)["skin"] == "fail"
+    assert _levels(report)["bones"] == "pass"           # the skeleton itself is fine
+
+
+def test_a_missing_required_bone_fails_and_names_it(tmp_path):
+    report = check_code27(make_vrm(tmp_path / "armless.vrm", drop_bones=("leftHand",)))
+    bones = next(i for i in report["items"] if i["id"] == "bones")
+    assert bones["level"] == "fail" and "leftHand" in bones["detail"]
+    assert report["verdict"] == "fail"
+
+
+def test_missing_emotions_and_plain_materials_are_warnings_not_failures(tmp_path):
+    report = check_code27(
+        make_vrm(tmp_path / "old.vrm", presets=("aa", "ih", "ou", "ee", "oh", "blink"), mtoon=False)
+    )
+    levels = _levels(report)
+    assert levels["emotions"] == "warn" and levels["materials"] == "warn"
+    assert levels["lipsync"] == "pass"
+    assert report["verdict"] == "warn"
+    emotions = next(i for i in report["items"] if i["id"] == "emotions")
+    assert "surprised" in emotions["detail"]
+
+
+def test_no_mouth_shapes_is_a_failure(tmp_path):
+    report = check_code27(make_vrm(tmp_path / "mute.vrm", presets=("blink",)))
+    assert _levels(report)["lipsync"] == "fail"
+
+
+def test_arms_at_the_sides_are_flagged_as_not_a_t_pose(tmp_path):
+    report = check_code27(make_vrm(tmp_path / "apose.vrm", arms_down=True))
+    assert _levels(report)["pose"] == "warn"
+    assert _levels(check_code27(make_vrm(tmp_path / "tpose.vrm")))["pose"] == "pass"
+
+
+def test_vrm0_files_are_read_with_their_older_names(tmp_path):
+    report = check_code27(make_vrm(tmp_path / "zero.vrm", vrm0=True))
+    levels = _levels(report)
+    assert report["vrm_version"] == "0.x"
+    assert levels["bones"] == "pass" and levels["skin"] == "pass"
+    assert levels["lipsync"] == "pass" and levels["materials"] == "pass"
+    # VRM 0.x has no "surprised" preset at all, so that one is honestly missing.
+    assert levels["emotions"] == "warn"
+
+
+@pytest.mark.parametrize("payload", [b"", b"not a model", b"glTF\x02\x00\x00\x00", GLB])
+def test_junk_is_reported_not_raised(tmp_path, payload):
+    path = tmp_path / "junk.vrm"
+    path.write_bytes(payload)
+    report = check_code27(path)
+    assert report["verdict"] == "fail"
+    assert report["items"][0]["id"] == "format"
+
+
+def test_a_plain_gltf_is_told_it_isnt_a_vrm(tmp_path):
+    report = check_code27(make_vrm(tmp_path / "plain.vrm", plain_gltf=True))
+    assert report["verdict"] == "fail"
+    assert "not a VRM" in report["items"][0]["detail"]
+
+
+def test_a_missing_file_is_a_failed_check_not_a_crash(tmp_path):
+    assert check_code27(tmp_path / "nope.vrm")["verdict"] == "fail"
+
+
+def test_check_endpoint_reads_gallery_avatars_only(rig_dir, tmp_path):
+    vrm_dir = tmp_path / "vrm"
+    vrm_dir.mkdir()
+    make_vrm(vrm_dir / "abc123.vrm")
+    ok = client.get("/api/rig/check", params={"vrm": "/static/gallery/vrm/abc123.vrm"})
+    assert ok.status_code == 200
+    assert ok.json()["target"] == "code27"
+    assert client.get("/api/rig/check", params={"vrm": "abc123.vrm"}).status_code == 200
+    assert client.get("/api/rig/check", params={"vrm": "missing.vrm"}).status_code == 404
+
+
+@pytest.mark.parametrize("bad", ["../../etc/passwd", "..%2f..%2fsecrets.vrm", "a b.vrm", "x.glb", ".vrm", ""])
+def test_check_endpoint_cannot_be_pointed_outside_the_gallery(bad, rig_dir, tmp_path):
+    (tmp_path / "secrets.vrm").write_bytes(b"glTF")
+    r = client.get("/api/rig/check", params={"vrm": bad})
+    assert r.status_code in (400, 404, 422)
+    assert r.status_code != 200
+
+
+def test_every_finished_rig_carries_its_checklist(tmp_path):
+    vrm = make_vrm(tmp_path / "done.vrm", statue=True)
+    check = autorig._check_result({"vrm_path": str(vrm)})
+    assert check["verdict"] == "fail"                    # and the statue is caught at the source
+    assert autorig._check_result({}) is None
+
+
+def test_a_checker_that_trips_does_not_take_the_rig_down_with_it(tmp_path, monkeypatch):
+    def boom(_path):
+        raise RuntimeError("parser exploded")
+
+    monkeypatch.setattr(autorig, "check_code27", boom)
+    check = autorig._check_result({"vrm_path": str(tmp_path / "x.vrm")})
+    assert check["verdict"] == "unknown" and "parser exploded" in check["note"]

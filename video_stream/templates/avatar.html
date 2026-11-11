@@ -82,6 +82,14 @@
       padding: 5px 10px; cursor: pointer; }
     .g-item .g-actions button:hover { background: #2c2c34; }
     .g-item .g-actions .g-del { color: #ff8fa8; }
+    .g-item .g-actions .m-primary { color: #4fd1c5; border-color: rgba(79,209,197,.5); }
+    .g-item.m-playing { border-color: rgba(79,209,197,.6); }
+    .m-input { width: 100%; font: inherit; color: #ececf1; background: #0c0c0e; border: 1px solid rgba(255,255,255,0.18);
+      border-radius: 8px; padding: 7px 9px; margin-bottom: 8px; }
+    .m-input:focus-visible, .m-trim input:focus-visible { outline: 2px solid #4fd1c5; outline-offset: 1px; }
+    .m-trim { display: grid; grid-template-columns: 40px 1fr; align-items: center; gap: 8px; margin-bottom: 6px; color: #8b8b98; font-size: 11px; }
+    .m-trim input { width: 100%; accent-color: #4fd1c5; }
+    .m-note { color: #ff8fa8; margin: 8px 0 0; min-height: 1em; }
     .gallery-empty { color: #5c5c6a; text-align: center; padding: 24px 12px; }
     .gallery-foot { padding: 10px 16px; border-top: 1px solid rgba(255,255,255,0.08);
       color: #5c5c6a; font-size: 11px; }
@@ -136,6 +144,19 @@
       color: #6f6f7d; background: #121216; border-radius: 8px; padding: 8px 10px;
       white-space: pre-wrap; word-break: break-word; }
     .rig hr { border: none; border-top: 1px solid rgba(255,255,255,0.08); }
+    /* The Code27 checklist on a finished rig. */
+    .rig-check ul { list-style: none; display: flex; flex-direction: column; gap: 7px; margin-bottom: 8px; }
+    .rig-check li { display: flex; gap: 9px; align-items: flex-start; font-size: 12px; line-height: 1.45; }
+    .rig-check li i { flex: 0 0 16px; height: 16px; border-radius: 50%; font: 700 10px/16px "IBM Plex Mono", monospace;
+      text-align: center; font-style: normal; margin-top: 1px; background: #23232a; color: #8b8b98; }
+    .rig-check li.pass i { background: rgba(79,209,197,.16); color: #4fd1c5; }
+    .rig-check li.warn i { background: rgba(255,207,143,.16); color: #ffcf8f; }
+    .rig-check li.fail i { background: rgba(255,143,168,.18); color: #ff8fa8; }
+    .rig-check li b { display: block; color: #ececf1; font-weight: 600; }
+    .rig-check li span { color: #8b8b98; }
+    .rig-check li.pass span { display: none; }   /* passes need no explaining */
+    .rig-verdict { float: right; text-transform: none; letter-spacing: 0; font: 500 11px "IBM Plex Mono", monospace; }
+    .rig-verdict.pass { color: #4fd1c5; } .rig-verdict.warn { color: #ffcf8f; } .rig-verdict.fail { color: #ff8fa8; }
   </style>
 </head>
 <body>
@@ -167,6 +188,16 @@
     <div class="gallery-foot" id="rig-foot">Drop a raw .glb here and get a drivable VRM back.</div>
   </div>
 
+  <!-- Moves (slides in): recorded performances -->
+  <div id="moves" class="gallery hidden">
+    <div class="gallery-head">
+      <strong>Moves</strong>
+      <button id="moves-close" type="button" title="Close">✕</button>
+    </div>
+    <div id="moves-list" class="gallery-list"></div>
+    <div class="gallery-foot">Record a move once, play it on any avatar. Play and Loop also run on your OBS avatar sources.</div>
+  </div>
+
   <div class="bar" id="bar">
     <button id="btn-track" type="button">Start tracking</button>
     <select id="src-select" title="Tracking source (local webcam or a camera stream)"></select>
@@ -175,6 +206,8 @@
     <button id="btn-body" type="button" title="Track arms, legs & torso (needs your body in frame)">Full&nbsp;body</button>
     <button id="btn-mirror" class="on" type="button" title="Mirror like a selfie">Mirror</button>
     <button id="btn-bg" type="button" title="Preview backdrop (not shown in OBS)">Preview&nbsp;bg</button>
+    <button id="btn-rec" type="button" title="Record what you do as a reusable move (3-second countdown)">● Record</button>
+    <button id="btn-moves" type="button" title="Your recorded moves: play, loop, rename, export">Moves</button>
     <button id="btn-save" type="button" title="Save this avatar + setup to your gallery">Save</button>
     <button id="btn-gallery" type="button" title="Open your saved avatars">Gallery</button>
     <button id="btn-copy" type="button" title="Copy a ready-to-paste OBS Browser Source URL with the current setup">Copy&nbsp;OBS&nbsp;URL</button>

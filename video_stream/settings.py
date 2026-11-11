@@ -37,26 +37,75 @@ class Field:
     kind: type  # str | int | float | bool
     default: Any
     secret: bool = False
-    help: str = ""
+    help: str = ""    # one plain sentence shown under the field
+    label: str = ""   # what the dashboard calls it (the key stays the CLI name)
+    group: str = "Other"
+    suggest: str = ""  # "scene" | "input": offer names read from OBS
 
 
 # Keys double as config[] keys and argparse dests, so one name works everywhere.
 FIELDS: dict[str, Field] = {
-    "obs_host": Field(str, "127.0.0.1", help="OBS WebSocket host"),
-    "obs_port": Field(int, 4455, help="OBS WebSocket port"),
-    "obs_password": Field(str, "", secret=True, help="OBS WebSocket password"),
-    "obs_scene_map": Field(str, "", help='Camera→scene map, e.g. "0=Cam A,1=Cam B"'),
-    "director_hold": Field(float, 1.5, help="Seconds a challenger must lead before a cut"),
-    "director_cooldown": Field(float, 3.0, help="Minimum seconds between cuts"),
-    "director_min_score": Field(float, 0.02, help="Motion score needed to be a candidate"),
-    "director_auto_punch": Field(bool, False, help="Punch in on the subject after each cut"),
-    "peers": Field(str, "", help='Rig Link peers, e.g. "studio=192.168.1.42:8765"'),
-    "safety_fallback_scene": Field(str, "", help="OBS scene for the panic cut"),
-    "safety_max_actions": Field(int, 40, help="Max automated OBS actions per minute"),
-    "replay_media_source": Field(str, "", help="OBS media source for instant replay playback"),
-    "replay_lower_third": Field(str, "", help="OBS text source for the replay lower-third"),
-    "replay_lower_third_scene": Field(str, "", help="Scene holding the lower-third source"),
-    "auth_token": Field(str, "", secret=True, help="Shared token required for settings changes"),
+    "obs_host": Field(
+        str, "127.0.0.1", label="OBS computer", group="OBS connection",
+        help="Where OBS runs. Leave as 127.0.0.1 when OBS is on this computer.",
+    ),
+    "obs_port": Field(
+        int, 4455, label="OBS port", group="OBS connection",
+        help="Shown in OBS under Tools → WebSocket Server Settings. 4455 unless you changed it.",
+    ),
+    "obs_password": Field(
+        str, "", secret=True, label="OBS password", group="OBS connection",
+        help="From OBS: Tools → WebSocket Server Settings → Show Connect Info.",
+    ),
+    "obs_scene_map": Field(
+        str, "", label="Camera → scene map", group="Auto-director",
+        help='Which OBS scene shows which camera, e.g. "0=Cam 0,100=Cam 100". '
+        "“Set up OBS for me” fills this in.",
+    ),
+    "director_hold": Field(
+        float, 1.5, label="Hold before cutting (seconds)", group="Auto-director",
+        help="How long another camera must stay the most active before the director cuts to it. Higher = calmer.",
+    ),
+    "director_cooldown": Field(
+        float, 3.0, label="Minimum time between cuts (seconds)", group="Auto-director",
+        help="Stops rapid back-and-forth cutting.",
+    ),
+    "director_min_score": Field(
+        float, 0.02, label="Motion needed to count as active (0–1)", group="Auto-director",
+        help="Raise it if a fan, a screen or background movement keeps stealing the shot.",
+    ),
+    "director_auto_punch": Field(
+        bool, False, label="Zoom in after each cut", group="Auto-director",
+        help="Punches in on the person after a cut, then eases back out.",
+    ),
+    "replay_media_source": Field(
+        str, "", label="Instant-replay player", group="Replays", suggest="input",
+        help="Optional. An OBS Media Source that plays each saved highlight straight away.",
+    ),
+    "replay_lower_third": Field(
+        str, "", label="Replay caption text", group="Replays", suggest="input",
+        help="Optional. An OBS Text source that shows the replay's label.",
+    ),
+    "replay_lower_third_scene": Field(
+        str, "", label="Scene holding that caption", group="Replays", suggest="scene",
+        help="Optional. The scene the caption text lives in, so it can be shown and hidden.",
+    ),
+    "safety_fallback_scene": Field(
+        str, "", label="Panic scene", group="Safety", suggest="scene",
+        help="Optional. A safe scene (a “Be right back” card) the panic cut switches to.",
+    ),
+    "safety_max_actions": Field(
+        int, 40, label="Automation limit per minute", group="Safety",
+        help="The most automatic OBS actions allowed in a minute, so a runaway loop can't spam your scenes.",
+    ),
+    "peers": Field(
+        str, "", label="Other video-stream computers", group="More computers",
+        help='Optional. Lets the director react to cameras on other machines, e.g. "studio=192.168.1.42:8765".',
+    ),
+    "auth_token": Field(
+        str, "", secret=True, label="Admin password", group="Security",
+        help="Optional but recommended. Once set, changing settings, adding devices and rigging ask for it.",
+    ),
 }
 
 
@@ -148,6 +197,9 @@ class Settings:
                         "default": field.default,
                         "secret": field.secret,
                         "help": field.help,
+                        "label": field.label or key,
+                        "group": field.group,
+                        "suggest": field.suggest,
                     }
                 )
             return out

@@ -63,6 +63,7 @@ class CameraInfo:
     error: str | None = None
     pose: bool = False
     zoom: float = 1.0
+    kind: str = "local"  # "local" (a device on this machine) or "remote" (a phone/tablet)
 
 
 class ZoomState:
@@ -524,6 +525,151 @@ class CameraStream:
         return cap if cap.isOpened() else None
 
 
+# Remote cameras (phones, tablets) live in their own index range so a local
+# rescan — which probes 0..max_probe — can never collide with or evict one.
+REMOTE_INDEX_BASE = 100
+REMOTE_STALE_AFTER = 3.0  # seconds without a frame before a remote camera reads as offline
+REMOTE_MAX_FRAME_BYTES = 3 * 1024 * 1024
+
+
+def jpeg_size(data: bytes) -> tuple[int, int] | None:
+    """(width, height) from a JPEG's frame header, or None if it isn't one.
+
+    Walks the marker segments instead of decoding — this runs on every frame
+    a phone sends, and doubles as the "is this really a JPEG" check."""
+    if len(data) < 4 or data[0] != 0xFF or data[1] != 0xD8:
+        return None
+    i, n = 2, len(data)
+    while i + 9 < n:
+        if data[i] != 0xFF:
+            return None
+        marker = data[i + 1]
+        if marker == 0xFF:  # fill byte
+            i += 1
+            continue
+        if 0xD0 <= marker <= 0xD9 or marker == 0x01:  # standalone markers
+            i += 2
+            continue
+        length = (data[i + 2] << 8) | data[i + 3]
+        if length < 2:
+            return None
+        # SOF0..SOF15 carry the frame size (C4/C8/CC are tables, not frames)
+        if 0xC0 <= marker <= 0xCF and marker not in (0xC4, 0xC8, 0xCC):
+            height = (data[i + 5] << 8) | data[i + 6]
+            width = (data[i + 7] << 8) | data[i + 8]
+            return (width, height) if width and height else None
+        i += 2 + length
+    return None
+
+
+class RemoteCameraStream(CameraStream):
+    """A camera whose frames are pushed in over the network (a phone or tablet
+    running the /cam page) instead of read from a local device.
+
+    It is a real CameraStream to everything downstream — /stream, /view,
+    snapshots, Smart Zoom, the pose overlay, motion scoring, the director and
+    the avatar source picker all work unchanged. ``push_jpeg`` is called from
+    the server's event loop and only swaps a reference; decoding and the CV
+    pipeline run on this stream's own thread, and a slow pipeline drops frames
+    rather than queueing them (latest frame wins)."""
+
+    def __init__(self, *args, key: str = "", **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.key = key
+        self._inbox: bytes | None = None
+        self._inbox_event = threading.Event()
+
+    @property
+    def active(self) -> bool:
+        return self._running and (time.time() - self.stats.last_frame_at) < REMOTE_STALE_AFTER
+
+    def info(self) -> CameraInfo:
+        info = super().info()
+        info.kind = "remote"
+        if not info.active and self._running and info.error is None:
+            info.error = "waiting for the device"
+        return info
+
+    def start(self) -> bool:
+        if self._running:
+            return True
+        self._maybe_init_pose()
+        if self.motion_enabled and self._motion is None:
+            from video_stream.motion import MotionScorer
+
+            self._motion = MotionScorer()
+        self._running = True
+        self._error = None
+        self._thread = threading.Thread(
+            target=self._capture_loop, name=f"remote-camera-{self.index}", daemon=True
+        )
+        self._thread.start()
+        return True
+
+    def stop(self) -> None:
+        self._running = False
+        self._inbox_event.set()  # wake the worker so it can exit promptly
+        super().stop()
+        self._inbox = None
+        self.stats.last_frame_at = 0.0
+
+    def push_jpeg(self, data: bytes) -> bool:
+        """Hand over one JPEG frame. False = rejected (not a JPEG / too big /
+        stream stopped). Never blocks."""
+        if not self._running or len(data) > REMOTE_MAX_FRAME_BYTES:
+            return False
+        if jpeg_size(data) is None:
+            return False
+        self._inbox = data
+        self._inbox_event.set()
+        return True
+
+    def _capture_loop(self) -> None:
+        frame_times: list[float] = []
+        while self._running:
+            if not self._inbox_event.wait(timeout=0.25):
+                continue
+            self._inbox_event.clear()
+            data, self._inbox = self._inbox, None
+            if data is None:
+                continue
+
+            size = jpeg_size(data)
+            if size is None:
+                self.stats.dropped += 1
+                continue
+            motion = self._motion
+            needs_pixels = motion is not None or self._pose is not None or not self.zoom.idle
+            if needs_pixels:
+                frame = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
+                if frame is None:
+                    self.stats.dropped += 1
+                    continue
+                # Same order as a local camera: score the raw frame, zoom, then pose.
+                if motion is not None:
+                    self.motion_score = motion.update(frame)
+                frame = self.zoom.apply(frame)
+                self._encode_frame(self._apply_pose(frame))
+            else:
+                # Nothing to draw or measure: forward the phone's own JPEG and
+                # skip a decode + re-encode per frame.
+                with self._lock:
+                    self._frame = None
+                    self._jpeg = data
+            self._actual_width, self._actual_height = size
+
+            self.stats.frames += 1
+            now = time.time()
+            self.stats.last_frame_at = now
+            frame_times.append(now)
+            frame_times = [t for t in frame_times if now - t < 2.0]
+            if len(frame_times) >= 2:
+                self.stats.fps = (len(frame_times) - 1) / max(
+                    0.001, frame_times[-1] - frame_times[0]
+                )
+                self._actual_fps = self.stats.fps
+
+
 class CameraManager:
     """Discovers cameras and manages their streams."""
 
@@ -641,6 +787,55 @@ class CameraManager:
         so a background scan can't reopen devices we just released."""
         self._closed = True
         self.stop_all()
+
+    def add_remote(self, key: str, name: str, index: int | None = None) -> "RemoteCameraStream":
+        """Get-or-create the remote camera for a paired device. ``index`` pins
+        the slot (so a device keeps its OBS URL across restarts); when it is
+        missing or taken, the next free slot from REMOTE_INDEX_BASE is used."""
+        with self._lock:
+            for stream in self._streams.values():
+                if isinstance(stream, RemoteCameraStream) and stream.key == key:
+                    stream.name = name
+                    break
+            else:
+                if index is None or index < REMOTE_INDEX_BASE or index in self._streams:
+                    index = REMOTE_INDEX_BASE
+                    while index in self._streams:
+                        index += 1
+                stream = RemoteCameraStream(
+                    index=index,
+                    name=name,
+                    width=self.width,
+                    height=self.height,
+                    jpeg_quality=self.jpeg_quality,
+                    target_fps=self.target_fps,
+                    pose_enabled=False,  # opt in per camera from the dashboard
+                    pose_variant=self.pose_variant,
+                    pose_stride=self.pose_stride,
+                    motion_enabled=self.motion_enabled,
+                    key=key,
+                )
+                self._streams[index] = stream
+        if not self._closed:
+            stream.start()
+        return stream
+
+    def remove_remote(self, key: str) -> bool:
+        with self._lock:
+            found = next(
+                (
+                    s
+                    for s in self._streams.values()
+                    if isinstance(s, RemoteCameraStream) and s.key == key
+                ),
+                None,
+            )
+            if found is not None:
+                del self._streams[found.index]
+        if found is None:
+            return False
+        found.stop()
+        return True
 
     def set_motion_all(self, enabled: bool) -> None:
         """Enable/disable motion scoring on every stream (for the director)."""
